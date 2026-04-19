@@ -6,15 +6,13 @@ $date_display = $date_obj ? date_format($date_obj, 'Y年m月d日') : $date_str;
 ?>
 <div class="nf-header"><h1><?php echo esc_html($date_display); ?> - AI资讯盘点</h1><p>每日AI行业资讯汇总</p></div>
 
-<div class="nf-daily-recap-list">
+<div class="nf-daily-recap-list" itemscope itemtype="https://schema.org/ItemList">
 <?php
 global $wp_query;
 
-// 如果没有日期查询参数，显示说明
 if (empty($date_str)) {
     echo '<p class="nf-empty">请访问形如 /newsflash/2026-04-17/ 的日期链接</p>';
 } else {
-    // 查询指定日期的快讯
     $daily_posts = new WP_Query([
         'post_type' => 'newsflash',
         'posts_per_page' => -1,
@@ -28,7 +26,9 @@ if (empty($date_str)) {
     ]);
     
     if ($daily_posts->have_posts()) {
+		$item_count = 0;
         while ($daily_posts->have_posts()) : $daily_posts->the_post();
+			$item_count++;
             $post_id = get_the_ID();
             $time = esc_html(get_the_date('Y-m-d H:i'));
             $title = esc_html(get_the_title());
@@ -43,17 +43,19 @@ if (empty($date_str)) {
                 $category_html = implode('', $cats);
             }
 ?>
-<div class="nf-daily-item">
-    <div class="nf-article">
+<div class="nf-daily-item" itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+	<meta itemprop="position" content="<?php echo esc_attr($item_count); ?>">
+	<div class="nf-article" itemscope itemtype="https://schema.org/Article">
+		<meta itemprop="datePublished" content="<?php echo esc_attr(get_the_date('c')); ?>">
         <div class="nf-article-header">
             <div class="nf-article-meta">
                 <span class="nf-article-time"><?php echo $time; ?></span>
                 <?php echo $category_html; ?>
             </div>
-            <h2 class="nf-article-title"><?php echo $title; ?></h2>
+            <h2 class="nf-article-title" itemprop="headline"><a href="<?php the_permalink(); ?>"><?php echo $title; ?></a></h2>
         </div>
         <div class="nf-article-body">
-            <div class="nf-article-content">
+            <div class="nf-article-content" itemprop="articleBody">
                 <?php echo $content; ?>
             </div>
         </div>
@@ -70,7 +72,6 @@ if (empty($date_str)) {
 </div>
 
 <style>
-/* 每日盘点样式 */
 .nf-daily-recap-list { max-width: 1600px; margin: 0 auto; padding: 32px 16px; }
 .nf-daily-item { margin-bottom: 48px; }
 .nf-daily-item:last-child { margin-bottom: 0; }
@@ -81,6 +82,8 @@ if (empty($date_str)) {
 .nf-article-time { color: #1e6fff; font-weight: 600; font-size: 13px; }
 .nf-article-category { background: #f0f4ff; color: #1e6fff; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
 .nf-article-title { font-size: 28px; font-weight: 700; color: #1a1a1a; margin: 0; line-height: 1.4; }
+.nf-article-title a { color: inherit; text-decoration: none; }
+.nf-article-title a:hover { color: #1e6fff; }
 .nf-article-content { font-size: 17px; line-height: 1.8; color: #333; }
 .nf-article-content p { margin: 0 0 16px; }
 .nf-article-content p:last-child { margin-bottom: 0; }

@@ -1,15 +1,94 @@
 <?php
 /**
  * Plugin Name: NewsFlash 快讯插件
- * Version: 1.4.7
- * Description: 新浪财经风格快讯插件，支持20套模板、分页、REST API
+ * Version: 1.5.1
+ * Description: 新浪财经风格快讯插件，支持20套模板、分页、REST API、SEO优化
  */
 
 if (!defined('ABSPATH')) exit;
 
-define('NEWSFLASH_VERSION', '1.4.0');
+define('NEWSFLASH_VERSION', '1.5.1');
 define('NEWSFLASH_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('NEWSFLASH_PLUGIN_URL', plugin_dir_url(__FILE__));
+
+/**
+ * 获取面包屑导航 HTML
+ */
+function newsflash_get_breadcrumb($type = 'single', $args = []) {
+    $timeline_url = get_post_type_archive_link('newsflash');
+    $html = '<nav class="nf-breadcrumb">';
+    
+    if ($type === 'single') {
+        $post = $args['post'] ?? get_post();
+        $post_date = get_the_date('Y-m-d', $post);
+        $daily_url = home_url('/newsflash/' . $post_date . '/');
+        $html .= '<a href="' . esc_url($timeline_url) . '">快讯时间线</a>';
+        $html .= '<span class="nf-breadcrumb-sep">›</span>';
+        $html .= '<a href="' . esc_url($daily_url) . '">' . esc_html(get_the_date('Y年m月d日', $post)) . ' 盘点</a>';
+        $html .= '<span class="nf-breadcrumb-sep">›</span>';
+        $html .= '<span class="nf-breadcrumb-current">' . esc_html(wp_trim_words($post->post_title, 10, '...')) . '</span>';
+    } elseif ($type === 'daily') {
+        $date_display = $args['date_display'] ?? '';
+        $html .= '<a href="' . esc_url($timeline_url) . '">快讯时间线</a>';
+        $html .= '<span class="nf-breadcrumb-sep">›</span>';
+        $html .= '<span class="nf-breadcrumb-current">' . esc_html($date_display) . ' 盘点</span>';
+    } elseif ($type === 'category') {
+        $term = $args['term'] ?? get_queried_object();
+        $html .= '<a href="' . esc_url($timeline_url) . '">快讯时间线</a>';
+        $html .= '<span class="nf-breadcrumb-sep">›</span>';
+        $html .= '<span class="nf-breadcrumb-current">' . esc_html($term->name) . '</span>';
+    }
+    
+    $html .= '</nav>';
+    return $html;
+}
+
+/**
+ * 获取日期导航 HTML（用于每日盘点）
+ */
+function newsflash_get_date_nav($current_date) {
+    $timeline_url = get_post_type_archive_link('newsflash');
+    $prev_date = date_create($current_date);
+    $prev_date->modify('-1 day');
+    $prev_url = home_url('/newsflash/' . $prev_date->format('Y-m-d') . '/');
+    
+    $next_date = date_create($current_date);
+    $next_date->modify('+1 day');
+    $next_url = home_url('/newsflash/' . $next_date->format('Y-m-d') . '/');
+    $today_str = date('Y-m-d');
+    
+    $html = '<nav class="nf-date-nav">';
+    $html .= '<a href="' . esc_url($prev_url) . '" class="nf-date-prev">← 前一天</a>';
+    $html .= '<a href="' . esc_url($timeline_url) . '" class="nf-date-all">全部快讯</a>';
+    if ($next_date->format('Y-m-d') <= $today_str) {
+        $html .= '<a href="' . esc_url($next_url) . '" class="nf-date-next">后一天 →</a>';
+    }
+    $html .= '</nav>';
+    return $html;
+}
+
+/**
+ * 获取每日盘点快捷链接（用于时间线页面）
+ */
+function newsflash_get_daily_links($limit = 7) {
+    global $wpdb;
+    $dates = $wpdb->get_col($wpdb->prepare(
+        "SELECT DISTINCT DATE(post_date) as d FROM {$wpdb->posts} WHERE post_type='newsflash' AND post_status='publish' ORDER BY post_date DESC LIMIT %d",
+        $limit
+    ));
+    
+    if (empty($dates)) return '';
+    
+    $html = '<nav class="nf-daily-nav"><span class="nf-daily-nav-label">每日盘点：</span>';
+    foreach ($dates as $date) {
+        $date_obj = date_create($date);
+        $date_display = $date_obj ? date_format($date_obj, 'm月d日') : $date;
+        $daily_url = home_url('/newsflash/' . $date . '/');
+        $html .= '<a href="' . esc_url($daily_url) . '" class="nf-daily-link">' . esc_html($date_display) . '</a>';
+    }
+    $html .= '</nav>';
+    return $html;
+}
 
 final class NewsFlash_Plugin {
     private static $instance = null;
@@ -181,7 +260,7 @@ final class NewsFlash_Plugin {
     }
     
     public function load_assets() {
-        if (is_singular('newsflash') || is_post_type_archive('newsflash')) {
+        if (is_singular('newsflash') || is_post_type_archive('newsflash') || is_tax('newsflash_category')) {
             wp_enqueue_style('newsflash', NEWSFLASH_PLUGIN_URL . 'assets/css/newsflash.css', [], NEWSFLASH_VERSION);
             
             $s = get_option('newsflash_settings', []);
@@ -233,7 +312,7 @@ final class NewsFlash_Plugin {
             $file = NEWSFLASH_PLUGIN_DIR . 'templates/single-' . $tpl . '.php';
             if (!file_exists($file)) { $file = NEWSFLASH_PLUGIN_DIR . 'templates/single-sina.php'; }
             if (file_exists($file)) {
-                $this->render_template($file, $settings);
+                $this->render_template($file, $settings, 'single', $post_id);
                 exit;
             }
         }
@@ -265,7 +344,33 @@ final class NewsFlash_Plugin {
             });
             $file = NEWSFLASH_PLUGIN_DIR . 'templates/archive-daily.php';
             if (file_exists($file)) {
-                $this->render_template_with_seo($file, $settings, $seo_title, $seo_desc);
+                $this->render_template_with_seo($file, $settings, $seo_title, $seo_desc, 'daily');
+                exit;
+            }
+        }
+        
+        // 分类归档页：/newsflash-category/ai应用/
+        if (is_tax('newsflash_category')) {
+            $tpl = $settings['timeline_template'] ?? 'sina';
+            
+            $term = get_queried_object();
+            $seo_title = $term->name . ' - AI快讯分类 - ' . get_bloginfo('name');
+            $seo_desc = '浏览' . $term->name . '分类下的所有快讯';
+            add_action('wp_head', function() use ($seo_title, $seo_desc) {
+                echo '<title>' . esc_html($seo_title) . '</title>' . "\n";
+                echo '<meta name="description" content="' . esc_attr($seo_desc) . '">' . "\n";
+            }, 0);
+            
+            add_filter('body_class', function($classes) use ($tpl) {
+                $classes[] = 't-' . $tpl;
+                $classes[] = 'nf-archive';
+                $classes[] = 'nf-category';
+                return $classes;
+            });
+            
+            $file = NEWSFLASH_PLUGIN_DIR . 'templates/archive-category.php';
+            if (file_exists($file)) {
+                $this->render_template_with_seo($file, $settings, $seo_title, $seo_desc, 'category');
                 exit;
             }
         }
@@ -307,19 +412,23 @@ final class NewsFlash_Plugin {
         }
     }
     
-    private function render_template($file, $settings) {
+    private function render_template($file, $settings, $breadcrumb_type = '', $post_id = null) {
         $show_footer = $settings['show_footer'] ?? true;
         get_header();
+        // 输出面包屑
+        $this->output_breadcrumb($breadcrumb_type, $post_id);
         include $file;
         if ($show_footer) { get_footer(); }
         exit;
     }
     
-    private function render_template_with_seo($file, $settings, $seo_title, $seo_desc = '') {
+    private function render_template_with_seo($file, $settings, $seo_title, $seo_desc = '', $breadcrumb_type = '') {
         $show_footer = $settings['show_footer'] ?? true;
         // 输出缓冲：捕获所有输出，然后用我们的SEO覆盖掉
         ob_start();
         get_header();
+        // 输出面包屑
+        $this->output_breadcrumb($breadcrumb_type);
         include $file;
         if ($show_footer) { get_footer(); }
         $output = ob_get_clean();
@@ -355,9 +464,56 @@ final class NewsFlash_Plugin {
         }
         
         get_header();
+        // 输出面包屑
+        if ($mode === 'article' && $post_id) {
+            $this->output_breadcrumb('single', $post_id);
+        }
         echo '<div class="nf-custom-' . $mode . '">' . wp_kses_post($content) . '</div>';
         if ($show_footer) { get_footer(); }
         exit;
+    }
+    
+    /**
+     * 输出面包屑导航
+     */
+    private function output_breadcrumb($type = '', $post_id = null) {
+        $timeline_url = get_post_type_archive_link('newsflash');
+        $html = '';
+        
+        if ($type === 'single' && $post_id) {
+            $post = get_post($post_id);
+            $post_date = get_the_date('Y-m-d', $post);
+            $post_date_display = get_the_date('Y年m月d日', $post);
+            $daily_url = home_url('/newsflash/' . $post_date . '/');
+            $html = '<nav class="nf-breadcrumb">';
+            $html .= '<a href="' . esc_url($timeline_url) . '">快讯时间线</a>';
+            $html .= '<span class="nf-breadcrumb-sep">›</span>';
+            $html .= '<a href="' . esc_url($daily_url) . '">' . esc_html($post_date_display) . ' 盘点</a>';
+            $html .= '<span class="nf-breadcrumb-sep">›</span>';
+            $html .= '<span class="nf-breadcrumb-current">快讯</span>';
+            $html .= '</nav>';
+        } elseif ($type === 'daily') {
+            $date_str = get_query_var('newsflash_date');
+            $date_obj = date_create($date_str);
+            $date_display = $date_obj ? date_format($date_obj, 'Y年m月d日') : $date_str;
+            $html = '<nav class="nf-breadcrumb">';
+            $html .= '<a href="' . esc_url($timeline_url) . '">快讯时间线</a>';
+            $html .= '<span class="nf-breadcrumb-sep">›</span>';
+            $html .= '<span class="nf-breadcrumb-current">' . esc_html($date_display) . ' 盘点</span>';
+            $html .= '</nav>';
+        } elseif ($type === 'category') {
+            $term = get_queried_object();
+            $html = '<nav class="nf-breadcrumb">';
+            $html .= '<a href="' . esc_url($timeline_url) . '">快讯时间线</a>';
+            $html .= '<span class="nf-breadcrumb-sep">›</span>';
+            $html .= '<span class="nf-breadcrumb-current">' . esc_html($term->name) . '</span>';
+            $html .= '</nav>';
+        }
+        
+        if ($html) {
+            echo $html . "\n";
+            echo '<style>.nf-breadcrumb{max-width:1600px;margin:0 auto 16px;padding:0 16px;font-size:14px;color:#666}.nf-breadcrumb a{color:#1e6fff;text-decoration:none}.nf-breadcrumb a:hover{text-decoration:underline}.nf-breadcrumb-sep{margin:0 8px;color:#999}.nf-breadcrumb-current{color:#333}</style>' . "\n";
+        }
     }
     
     public function timeline_shortcode($atts) {
@@ -434,7 +590,7 @@ final class NewsFlash_Plugin {
         $api_key = get_option('newsflash_api_key', '');
         ?>
         <div class="wrap">
-            <h1>快讯设置 <small style="font-size:12px;color:#666;">v1.4.7</small></h1>
+            <h1>快讯设置 <small style="font-size:12px;color:#666;">v<?php echo NEWSFLASH_VERSION; ?></small></h1>
             <style>
             .nf-settings { max-width: 960px; }
             .nf-settings-card { background: #fff; border: 1px solid #c3c4c7; border-radius: 8px; padding: 24px; margin-bottom: 24px; }
