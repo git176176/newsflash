@@ -1,12 +1,12 @@
 <?php
 /**
  * Plugin Name: NewsFlash 快讯插件
- * Version: 1.8.0
+ * Version: 1.8.1
  * Description: 新浪财经风格快讯插件，支持20套模板、底部推荐位（多样式Logo分类）、REST API、SEO优化
  */
 
 if (!defined('ABSPATH')) exit;
-define('NEWSFLASH_VERSION', '1.8.0');
+define('NEWSFLASH_VERSION', '1.8.1');
 define('NEWSFLASH_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('NEWSFLASH_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -80,13 +80,20 @@ function newsflash_get_recommend_section() {
     if (empty($enabled_tools)) return '';
     
     $title = esc_html($settings['title'] ?: '热门AI工具推荐');
-    $per_row = intval($settings['per_row'] ?: 6);
+    $per_row = max(4, min(8, intval($settings['per_row'] ?: 6))); // 限制范围4-8
     $show_desc = !empty($settings['show_description']);
     $show_logo = !empty($settings['show_logo']);
     $show_cta = !empty($settings['show_cta']);
     $cta_text = esc_html($settings['cta_text'] ?: '访问');
+    // 验证卡片样式
+    $valid_styles = ['card', 'compact', 'highlight', 'minimal'];
     $card_style = sanitize_text_field($settings['card_style'] ?: 'card');
+    if (!in_array($card_style, $valid_styles)) $card_style = 'card';
+    // 验证背景色
     $card_bg = esc_attr($settings['card_bg'] ?: '#ffffff');
+    if (!preg_match('/^#[a-fA-F0-9]{6}$/', $card_bg) && !preg_match('/^rgba?\(/', $card_bg)) {
+        $card_bg = '#ffffff';
+    }
     
     $html = '<section class="nf-recommend-section" id="nf-recommend"><div class="nf-recommend-inner">';
     $html .= '<h2 class="nf-recommend-title">' . $title . '</h2>';
@@ -251,11 +258,40 @@ final class NewsFlash_Plugin {
     }
     public function handle_recommend_form() {
         if (!isset($_POST['nr']) || !wp_verify_nonce($_POST['nr'], 'nr')) return;
+        
+        // 批量操作处理
+        if (isset($_POST['bulk_action']) && !empty($_POST['bulk_action']) && !empty($_POST['tool_ids'])) {
+            $action = sanitize_text_field($_POST['bulk_action']);
+            $ids = array_map('sanitize_text_field', $_POST['tool_ids']);
+            $tools = get_option('newsflash_recommend_tools', []);
+            
+            if ($action === 'delete') {
+                $tools = array_values(array_filter($tools, function($t) use ($ids) {
+                    return !in_array($t['id'] ?? '', $ids);
+                }));
+                update_option('newsflash_recommend_tools', $tools);
+                wp_redirect(admin_url('admin.php?page=nf_recommend&ok=8')); exit;
+            } elseif ($action === 'enable' || $action === 'disable') {
+                foreach ($tools as &$t) {
+                    if (in_array($t['id'] ?? '', $ids)) {
+                        $t['enabled'] = ($action === 'enable');
+                    }
+                }
+                update_option('newsflash_recommend_tools', $tools);
+                wp_redirect(admin_url('admin.php?page=nf_recommend&ok=' . ($action === 'enable' ? '9' : '10'))); exit;
+            }
+        }
+        
         if (isset($_POST['save_set'])) {
+            // 验证卡片样式
+            $valid_styles = ['card', 'compact', 'highlight', 'minimal'];
+            $card_style = sanitize_text_field($_POST['cs'] ?? 'card');
+            if (!in_array($card_style, $valid_styles)) $card_style = 'card';
+            
             update_option('newsflash_recommend_settings', [
                 'enabled'=>!empty($_POST['en']),'title'=>sanitize_text_field($_POST['title']?:'热门AI工具推荐'),'per_row'=>max(4,min(8,intval($_POST['pr']?:6))),
                 'show_description'=>!empty($_POST['sd']),'show_logo'=>!empty($_POST['sl']),'show_cta'=>!empty($_POST['sc']),
-                'cta_text'=>sanitize_text_field($_POST['ct']?:'访问'),'card_style'=>sanitize_text_field($_POST['cs']?:'card'),'card_bg'=>sanitize_hex_color($_POST['bg']?:'#ffffff'),
+                'cta_text'=>sanitize_text_field($_POST['ct']?:'访问'),'card_style'=>$card_style,'card_bg'=>$this->sanitize_color($_POST['bg']?:'#ffffff'),
             ]);
             wp_redirect(admin_url('admin.php?page=nf_recommend&ok=1')); exit;
         }
@@ -460,6 +496,23 @@ final class NewsFlash_Plugin {
     }
     public function api_docs_page() { $k=get_option('newsflash_api_key',''); echo '<div class="wrap"><h1>API</h1><p>Key: <code>'.esc_html($k).'</code></p><pre style="background:#f6f7f7;padding:16px;border-radius:8px">curl -X POST '.rest_url('newsflash/v1/posts').' -H "Content-Type: application/json" -H "X-NewsFlash-Key: '.$k.'" -d \'{"title":"标题","content":"内容"}\'</pre></div>'; }
     public function preview_page() { echo '<div class="wrap"><h1>预览</h1>'.do_shortcode('[newsflash_timeline count=5]').'</div>'; }
+    
+    /**
+     * 安全的颜色值验证
+     */
+    private function sanitize_color($color) {
+        $color = trim($color);
+        // 验证十六进制颜色
+        if (preg_match('/^#[a-fA-F0-9]{6}$/', $color)) {
+            return $color;
+        }
+        // 验证rgb/rgba格式
+        if (preg_match('/^rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*(,\s*[\d.]+\s*)?\)$/', $color)) {
+            return $color;
+        }
+        // 默认返回白色
+        return '#ffffff';
+    }
 }
 function newsflash_plugin() { return NewsFlash_Plugin::instance(); }
 newsflash_plugin();
