@@ -1,12 +1,12 @@
 <?php
 /**
  * Plugin Name: NewsFlash 快讯插件
- * Version: 1.10.2
- * Description: 新浪财经风格快讯插件，支持20套模板、底部推荐位（多样式Logo分类）、REST API、SEO优化
+ * Version: 1.11.6
+ * Description: 新浪财经风格快讯插件，支持20套模板、底部推荐位（多样式Logo分类）、REST API、SEO优化。v1.11 全新后台（仪表盘 + 控制台 Tabs + 推荐位曝光/点击统计 + 紫粉鲜艳配色）
  */
 
 if (!defined('ABSPATH')) exit;
-define('NEWSFLASH_VERSION', '1.10.2');
+define('NEWSFLASH_VERSION', '1.11.6');
 define('NEWSFLASH_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('NEWSFLASH_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -66,22 +66,15 @@ function newsflash_get_daily_links($limit = 7) {
 function newsflash_get_recommend_section($position = null, $page_type = 'single') {
     $settings = get_option('newsflash_recommend_settings', []);
     if (empty($settings['enabled'])) return '';
-    
-    // 页面类型检查：检查该页面类型是否启用
+
+    // 页面类型开关：字段存在且为 false 时跳过，未设字段时默认显示
     $page_enabled_key = 'show_' . $page_type;
-    if (!empty($settings[$page_enabled_key]) && $settings[$page_enabled_key] === false) return '';
-    if (empty($settings[$page_enabled_key]) && !isset($settings[$page_enabled_key])) {
-        // 如果没有设置，默认全部启用
-    } else {
-        if (empty($settings[$page_enabled_key])) return '';
-    }
-    
-    // 位置检查：如果指定了位置参数，只在匹配时显示
+    if (isset($settings[$page_enabled_key]) && empty($settings[$page_enabled_key])) return '';
+
+    // 位置匹配：position 参数非空时，必须与设置一致或在 both 模式下
     if ($position !== null) {
         $setting_position = $settings['position'] ?? 'bottom';
-        if ($setting_position === 'bottom' && $position !== 'bottom') return '';
-        if ($setting_position === 'top' && $position !== 'top') return '';
-        if ($setting_position === 'both' && !in_array($position, ['top', 'bottom'])) return '';
+        if ($setting_position !== 'both' && $setting_position !== $position) return '';
     }
     $tools = get_option('newsflash_recommend_tools', []);
     
@@ -95,6 +88,20 @@ function newsflash_get_recommend_section($position = null, $page_type = 'single'
     // 过滤启用的工具
     $enabled_tools = array_filter($tools, function($t) { return !empty($t['enabled']); });
     if (empty($enabled_tools)) return '';
+
+    // 累计曝光（仅前台、非搜索引擎机器人粗判；高流量可后续接 transient/队列）
+    if (!is_admin()) {
+        $stats = get_option('newsflash_recommend_stats', []);
+        $dirty = false;
+        foreach ($enabled_tools as $tool) {
+            $tid = $tool['id'] ?? '';
+            if ($tid === '') continue;
+            if (!isset($stats[$tid])) $stats[$tid] = ['v' => 0, 'c' => 0];
+            $stats[$tid]['v'] = (int)$stats[$tid]['v'] + 1;
+            $dirty = true;
+        }
+        if ($dirty) update_option('newsflash_recommend_stats', $stats, false);
+    }
     
     $title = esc_html($settings['title'] ?: '热门AI工具推荐');
     
@@ -114,14 +121,15 @@ function newsflash_get_recommend_section($position = null, $page_type = 'single'
     
     foreach ($enabled_tools as $tool) {
         $name = esc_html($tool['name'] ?: '');
+        $tid  = esc_attr($tool['id'] ?? '');
         $cat = esc_html($tool['category'] ?: '');
         $desc = $show_desc && !empty($tool['description']) ? '<span class="nf-rec-desc">' . esc_html($tool['description']) . '</span>' : '';
         $url = esc_url($tool['url'] ?: '#');
         $logo = $show_logo && !empty($tool['logo']) ? '<img src="' . esc_url($tool['logo']) . '" alt="' . esc_attr($name) . '" class="nf-rec-logo" loading="lazy">' : '';
         $cta = $show_cta ? '<a href="' . $url . '" class="nf-rec-cta" target="_blank" rel="noopener">' . $cta_text . ' →</a>' : '';
         $cat_tag = $cat ? '<span class="nf-rec-cat">' . $cat . '</span>' : '';
-        
-        $html .= '<div class="nf-recommend-card" onclick="window.open(\''.$url.'\', \'_blank\')" style="cursor:pointer">';
+
+        $html .= '<div class="nf-recommend-card" data-tool-id="'.$tid.'" data-url="'.$url.'" onclick="window.open(this.dataset.url,\'_blank\',\'noopener\')" style="cursor:pointer">';
         if ($logo) $html .= '<div class="nf-rec-logo-wrap">' . $logo . '</div>';
         $html .= '<div class="nf-rec-body">';
         $html .= '<div class="nf-rec-head"><a href="'.$url.'" class="nf-rec-name" target="_blank" rel="noopener">' . $name . '</a>' . $cat_tag . '</div>';
@@ -139,6 +147,7 @@ final class NewsFlash_Plugin {
         add_action('init', [$this, 'register_cpt'], 1);
         add_action('init', [$this, 'add_rewrite_rules'], 2);
         add_filter('query_vars', [$this, 'add_query_vars']);
+        add_action('pre_get_posts', [$this, 'modify_main_query']);
         add_action('rest_api_init', [$this, 'register_api']);
         add_action('wp_enqueue_scripts', [$this, 'load_assets']);
         add_filter('template_redirect', [$this, 'load_template'], 1);
@@ -146,6 +155,8 @@ final class NewsFlash_Plugin {
         add_shortcode('newsflash_list', [$this, 'list_shortcode']);
         add_shortcode('newsflash_recommend', [$this, 'recommend_shortcode']);
         add_action('admin_menu', [$this, 'create_admin_menu'], 1);
+        add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_assets']);
+        add_action('admin_init', [$this, 'redirect_legacy_pages'], 1);
         add_action('add_meta_boxes', [$this, 'add_keywords_metabox']);
         add_action('save_post_newsflash', [$this, 'save_keywords_metabox']);
         add_action('admin_init', [$this, 'handle_recommend_form']);
@@ -154,7 +165,7 @@ final class NewsFlash_Plugin {
     public function activate() {
         $this->register_cpt(); flush_rewrite_rules();
         if (get_option('newsflash_api_key') === false) add_option('newsflash_api_key', wp_generate_uuid4());
-        if (get_option('newsflash_settings') === false) add_option('newsflash_settings', ['article_template'=>'sina','timeline_template'=>'sina','timeline_position'=>'left','show_footer'=>true,'posts_per_page'=>10,'custom_css'=>'','custom_html_article'=>'','custom_html_timeline'=>'']);
+        if (get_option('newsflash_settings') === false) add_option('newsflash_settings', ['article_template'=>'sina','timeline_template'=>'sina','timeline_position'=>'left','show_footer'=>true,'posts_per_page'=>10,'custom_css'=>'']);
         if (get_option('newsflash_recommend_settings') === false) add_option('newsflash_recommend_settings', [
             'enabled'=>false,
             'title'=>'热门AI工具推荐',
@@ -179,6 +190,10 @@ final class NewsFlash_Plugin {
         ]);
         if (get_option('newsflash_recommend_tools') === false) add_option('newsflash_recommend_tools', []);
         if (get_option('newsflash_recommend_categories') === false) add_option('newsflash_recommend_categories', ['AI写作','AI设计','AI编程','AI视频','AI音频','AI办公','AI对话','AI开发平台','AI数字人','AI效率工具','其他']);
+        // 统计数据 — autoload=no 避免每次请求都读
+        if (get_option('newsflash_recommend_stats') === false) add_option('newsflash_recommend_stats', [], '', 'no');
+        // 页面访问量统计（按页面类型）— autoload=no
+        if (get_option('newsflash_page_views') === false) add_option('newsflash_page_views', ['single'=>0,'timeline'=>0,'daily'=>0,'category'=>0], '', 'no');
     }
     public function register_cpt() {
         register_post_type('newsflash', ['label'=>'快讯','labels'=>['name'=>'快讯','singular_name'=>'快讯','add_new'=>'发布快讯','add_new_item'=>'发布新快讯','edit_item'=>'编辑快讯','new_item'=>'新快讯','view_item'=>'查看快讯','search_items'=>'搜索快讯','not_found'=>'没有找到快讯'],'public'=>true,'show_ui'=>true,'show_in_menu'=>false,'supports'=>['title','editor','author','thumbnail','excerpt','custom-fields'],'has_archive'=>true,'rewrite'=>['slug'=>'newsflash','with_front'=>true],'show_in_rest'=>true,'rest_base'=>'newsflash']);
@@ -186,19 +201,42 @@ final class NewsFlash_Plugin {
     }
     public function add_rewrite_rules() { add_rewrite_rule('newsflash/([0-9]{4}-[0-9]{2}-[0-9]{2})/?$', 'index.php?post_type=newsflash&newsflash_date=$matches[1]', 'top'); }
     public function add_query_vars($vars) { $vars[] = 'newsflash_date'; return $vars; }
+    public function modify_main_query($q) {
+        if (is_admin() || !$q->is_main_query()) return;
+        if ($q->is_post_type_archive('newsflash')) {
+            $s = get_option('newsflash_settings', []);
+            $q->set('posts_per_page', max(1, (int)($s['posts_per_page'] ?? 10)));
+        }
+    }
+    /** 页面访问量累计 — 每次前台渲染对应页面类型 +1 */
+    private function bump_page_view($type) {
+        $valid = ['single', 'timeline', 'daily', 'category'];
+        if (!in_array($type, $valid, true)) return;
+        $pv = get_option('newsflash_page_views', []);
+        $pv[$type] = (int)($pv[$type] ?? 0) + 1;
+        update_option('newsflash_page_views', $pv, false);
+    }
     public function add_keywords_metabox() { add_meta_box('newsflash_keywords', '快讯关键词', [$this, 'render_keywords_metabox'], 'newsflash', 'side', 'default'); }
     public function render_keywords_metabox($post) { wp_nonce_field('newsflash_keywords', 'newsflash_keywords_nonce'); $k = get_post_meta($post->ID, 'newsflash_keywords', true); echo '<input type="text" name="newsflash_keywords" value="'.esc_attr($k).'" style="width:100%;padding:6px;border:1px solid #8c8f94;border-radius:4px"><p style="margin:4px 0 0;color:#646970;font-size:11px">英文逗号分隔</p>'; }
     public function save_keywords_metabox($pid) { if (!isset($_POST['newsflash_keywords_nonce']) || !wp_verify_nonce($_POST['newsflash_keywords_nonce'], 'newsflash_keywords')) return; if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return; if (isset($_POST['newsflash_keywords'])) update_post_meta($pid, 'newsflash_keywords', sanitize_text_field($_POST['newsflash_keywords'])); }
     public function register_api() {
-        register_rest_route('newsflash/v1', '/posts', ['methods'=>'POST','callback'=>[$this,'api_create'],'permission_callback'=>function(){ return isset($_SERVER['HTTP_X_NEWSFLASH_KEY']) && $_SERVER['HTTP_X_NEWSFLASH_KEY'] === get_option('newsflash_api_key',''); }]);
+        register_rest_route('newsflash/v1', '/posts', ['methods'=>'POST','callback'=>[$this,'api_create'],'permission_callback'=>function(){
+            $stored = get_option('newsflash_api_key', '');
+            $sent   = isset($_SERVER['HTTP_X_NEWSFLASH_KEY']) ? (string)$_SERVER['HTTP_X_NEWSFLASH_KEY'] : '';
+            return $stored !== '' && $sent !== '' && hash_equals($stored, $sent);
+        }]);
         register_rest_route('newsflash/v1', '/posts/(?P<id>\d+)', ['methods'=>'GET','callback'=>[$this,'api_get'],'permission_callback'=>'__return_true']);
         register_rest_route('newsflash/v1', '/categories', ['methods'=>'GET','callback'=>[$this,'api_categories'],'permission_callback'=>'__return_true']);
         register_rest_route('newsflash/v1', '/recommend-tools', ['methods'=>'GET','callback'=>[$this,'api_recommend_tools'],'permission_callback'=>'__return_true']);
+        register_rest_route('newsflash/v1', '/track', [
+            'methods' => 'POST',
+            'callback' => [$this, 'api_track'],
+            'permission_callback' => '__return_true',
+        ]);
     }
     public function api_create($req) {
         $p = $req->get_json_params(); $title = sanitize_text_field($p['title'] ?? ''); $content = wp_kses_post($p['content'] ?? '');
         if (!$title || !$content) return new WP_Error('error', '标题和内容不能为空', ['status'=>400]);
-        $content = wpautop($content);
         if (!empty($p['references']) && is_array($p['references'])) { $r = '<h3>📎 参考来源</h3><ul>'; foreach ($p['references'] as $ref) { $rt = esc_html($ref['title'] ?? ''); $ru = esc_url($ref['url'] ?? ''); if ($rt && $ru) $r .= '<li><a href="'.$ru.'" target="_blank">'.$rt.'</a></li>'; } $r .= '</ul>'; $content .= $r; }
         $arr = ['post_type'=>'newsflash','post_title'=>$title,'post_content'=>$content,'post_status'=>'publish'];
         if (!empty($p['slug'])) $arr['post_name'] = sanitize_title($p['slug']);
@@ -211,18 +249,37 @@ final class NewsFlash_Plugin {
     public function api_get($req) { $p = get_post($req['id']); if (!$p || $p->post_type !== 'newsflash') return new WP_Error('not_found', '快讯不存在', ['status'=>404]); return ['id'=>$p->ID,'title'=>$p->post_title,'content'=>$p->post_content,'date'=>$p->post_date]; }
     public function api_categories() { return ['categories'=>get_terms(['taxonomy'=>'newsflash_category','hide_empty'=>false])]; }
     public function api_recommend_tools() { return ['settings'=>get_option('newsflash_recommend_settings',[]),'tools'=>get_option('newsflash_recommend_tools',[]),'categories'=>get_option('newsflash_recommend_categories',[])]; }
+    /** 公开埋点端点：仅记录推荐位 click（view 由 PHP 渲染端记录） */
+    public function api_track($req) {
+        // 同时支持 query params 与 JSON body — sendBeacon 的 body 解析在部分环境会失败，
+        // get_param() 会按 URL→query→body→JSON 顺序取值，最稳妥
+        $tool_id = sanitize_text_field((string)$req->get_param('tool_id'));
+        $type    = sanitize_text_field((string)$req->get_param('type'));
+        if ($tool_id === '' || $type !== 'click') return new WP_Error('bad_request', 'invalid params', ['status' => 400]);
+
+        $stats = get_option('newsflash_recommend_stats', []);
+        if (!isset($stats[$tool_id])) $stats[$tool_id] = ['v' => 0, 'c' => 0];
+        $stats[$tool_id]['c'] = (int)$stats[$tool_id]['c'] + 1;
+        update_option('newsflash_recommend_stats', $stats, false);
+        return ['ok' => true, 'clicks' => $stats[$tool_id]['c']];
+    }
     public function load_assets() {
         if (is_singular('newsflash') || is_post_type_archive('newsflash') || is_tax('newsflash_category')) {
             wp_enqueue_style('newsflash', NEWSFLASH_PLUGIN_URL . 'assets/css/newsflash.css', [], NEWSFLASH_VERSION);
             $s = get_option('newsflash_settings', []);
             if (empty($s['show_footer'])) wp_add_inline_style('newsflash', 'footer.main-footer,footer.footer-stick,#footer,.site-footer,.main-footer,.wp-footer{display:none!important}');
             if (!empty($s['custom_css'])) wp_add_inline_style('newsflash', $s['custom_css']);
+            // 推荐位前台 JS（含 click 跟踪）
+            // 注意：必须 false（head 加载）。若用 footer，当 show_footer=false 时
+            // load_template 不调用 get_footer()→wp_footer() 不触发→脚本永不输出→点击不上报。
+            wp_enqueue_script('newsflash', NEWSFLASH_PLUGIN_URL . 'assets/js/newsflash.js', [], NEWSFLASH_VERSION, false);
+            wp_add_inline_script('newsflash', 'window.NF_TRACK_URL=' . wp_json_encode(rest_url('newsflash/v1/track')) . ';', 'before');
         }
     }
     public function load_template() {
         $settings = get_option('newsflash_settings', []);
-        add_filter('pre_get_posts', function($q) use ($settings) { if ($q->is_post_type_archive('newsflash')) $q->set('posts_per_page', $settings['posts_per_page'] ?? 10); });
         if (is_singular('newsflash')) {
+            $this->bump_page_view('single');
             $pid = get_queried_object_id(); $kw = get_post_meta($pid, 'newsflash_keywords', true);
             if ($kw) add_action('wp_head', function() use ($kw) { echo '<meta name="keywords" content="' . esc_attr($kw) . '">' . "\n"; }, 1);
             $tpl = $settings['article_template'] ?? 'sina';
@@ -243,6 +300,7 @@ final class NewsFlash_Plugin {
         }
         $date_str = get_query_var('newsflash_date');
         if (!empty($date_str) && is_string($date_str)) {
+            $this->bump_page_view('daily');
             $do = date_create($date_str); $dd = $do ? date_format($do, 'Y年m月d日') : $date_str;
             add_action('wp_head', function() use ($dd) { echo '<title>'.$dd.' AI资讯盘点 - '.get_bloginfo('name').'</title><meta name="description" content="'.$dd.' AI行业资讯">'."\n"; }, 0);
             add_filter('body_class', function($c) { $c[] = 't-'.(get_option('newsflash_settings')['timeline_template']??'sina'); $c[] = 'nf-archive nf-daily-recap'; return $c; });
@@ -264,6 +322,7 @@ final class NewsFlash_Plugin {
             }
         }
         if (is_tax('newsflash_category')) {
+            $this->bump_page_view('category');
             $term = get_queried_object();
             add_action('wp_head', function() use ($term) { echo '<title>'.$term->name.' - AI快讯 - '.get_bloginfo('name').'</title><meta name="description" content="浏览'.$term->name.'分类快讯">'."\n"; }, 0);
             add_filter('body_class', function($c) { $c[] = 't-'.(get_option('newsflash_settings')['timeline_template']??'sina'); $c[] = 'nf-archive nf-category'; return $c; });
@@ -285,6 +344,7 @@ final class NewsFlash_Plugin {
             }
         }
         if (is_post_type_archive('newsflash')) {
+            $this->bump_page_view('timeline');
             add_action('wp_head', function() { echo '<title>AI快讯 - '.get_bloginfo('name').'</title><meta name="description" content="实时更新AI行业资讯">'."\n"; }, 0);
             $tpl = $settings['timeline_template'] ?? 'sina';
             add_filter('body_class', function($c) use ($tpl, $settings) { $c[] = 't-'.$tpl; $c[] = 'nf-archive nf-position-'.($settings['timeline_position']??'left'); return $c; });
@@ -334,16 +394,626 @@ final class NewsFlash_Plugin {
     public function recommend_shortcode($atts) { return newsflash_get_recommend_section(); }
     public function create_admin_menu() {
         add_menu_page('NewsFlash', '快讯', 'manage_options', 'edit.php?post_type=newsflash', '', 'dashicons-megaphone', 5);
+        // 新菜单（顺序：仪表盘 → 内容管理 → 控制台 → 预览）
+        add_submenu_page('edit.php?post_type=newsflash', 'NewsFlash 仪表盘', '📊 仪表盘', 'manage_options', 'nf_dashboard', [$this, 'dashboard_page']);
         add_submenu_page('edit.php?post_type=newsflash', '所有快讯', '所有快讯', 'manage_options', 'edit.php?post_type=newsflash', '');
         add_submenu_page('edit.php?post_type=newsflash', '发布快讯', '发布快讯', 'manage_options', 'post-new.php?post_type=newsflash', '');
         add_submenu_page('edit.php?post_type=newsflash', '快讯分类', '快讯分类', 'manage_options', 'edit-tags.php?taxonomy=newsflash_category&post_type=newsflash', '');
-        add_submenu_page('edit.php?post_type=newsflash', '底部推荐位', '底部推荐位', 'manage_options', 'nf_recommend', [$this, 'recommend_page']);
-        add_submenu_page('edit.php?post_type=newsflash', '快讯设置', '设置', 'manage_options', 'nf_settings', [$this, 'settings_page']);
-        add_submenu_page('edit.php?post_type=newsflash', 'API 文档', 'API 文档', 'manage_options', 'nf_api', [$this, 'api_docs_page']);
+        add_submenu_page('edit.php?post_type=newsflash', 'NewsFlash 控制台', '⚙️ 控制台', 'manage_options', 'nf_console', [$this, 'console_page']);
         add_submenu_page('edit.php?post_type=newsflash', '时间线预览', '时间线预览', 'manage_options', 'nf_preview', [$this, 'preview_page']);
+        // 旧菜单：隐藏（parent = null）但回调仍存在，避免外部链接 404；实际上 redirect_legacy_pages 会更早拦截
+        add_submenu_page(null, '底部推荐位', '底部推荐位', 'manage_options', 'nf_recommend', [$this, 'recommend_page']);
+        add_submenu_page(null, '快讯设置', '设置', 'manage_options', 'nf_settings', [$this, 'settings_page']);
+        add_submenu_page(null, 'API 文档', 'API 文档', 'manage_options', 'nf_api', [$this, 'api_docs_page']);
     }
+
+    /** 拦截旧菜单 URL，重定向到新控制台对应 Tab */
+    public function redirect_legacy_pages() {
+        if (!is_admin() || !isset($_GET['page'])) return;
+        $map = [
+            'nf_recommend' => 'recommend',
+            'nf_settings'  => 'display',
+            'nf_api'       => 'api',
+        ];
+        $page = sanitize_key($_GET['page']);
+        if (isset($map[$page])) {
+            wp_safe_redirect(admin_url('admin.php?page=nf_console&tab=' . $map[$page]), 301);
+            exit;
+        }
+    }
+
+    /** 仅在 NewsFlash 自有 admin 页加载 admin CSS/JS */
+    public function enqueue_admin_assets($hook) {
+        if (!isset($_GET['page'])) return;
+        $page = sanitize_key($_GET['page']);
+        if (!in_array($page, ['nf_dashboard', 'nf_console', 'nf_recommend', 'nf_settings', 'nf_api'], true)) return;
+        wp_enqueue_style('newsflash-admin', NEWSFLASH_PLUGIN_URL . 'assets/css/admin.css', [], NEWSFLASH_VERSION);
+        wp_enqueue_script('newsflash-admin', NEWSFLASH_PLUGIN_URL . 'assets/js/admin.js', [], NEWSFLASH_VERSION, true);
+    }
+
+    /** 控制台主入口（Tab 路由） */
+    public function console_page() {
+        if (!current_user_can('manage_options')) return;
+        $tabs = [
+            'display'   => ['label' => '📰 模板与显示', 'renderer' => 'render_tab_display'],
+            'recommend' => ['label' => '📌 推荐位',     'renderer' => 'render_tab_recommend'],
+            'api'       => ['label' => '🔑 API',        'renderer' => 'render_tab_api'],
+            'advanced'  => ['label' => '⚙️ 高级',        'renderer' => 'render_tab_advanced'],
+        ];
+        $current = isset($_GET['tab']) ? sanitize_key($_GET['tab']) : 'display';
+        if (!isset($tabs[$current])) $current = 'display';
+
+        echo '<div class="wrap nfui-wrap"><h1>⚙️ NewsFlash 控制台 <span class="nfui-ver">v'.esc_html(NEWSFLASH_VERSION).'</span></h1>';
+        if (isset($_GET['ok'])) {
+            $msgs = [1=>'✅ 已保存',2=>'✅ 已添加',3=>'✅ 已删除',4=>'✅ 已添加',5=>'✅ 已删除',6=>'✅ 已切换',7=>'✅ 已更新',8=>'✅ 批量删除',9=>'✅ 批量启用',10=>'✅ 批量禁用'];
+            $ok = (int)$_GET['ok'];
+            if (isset($msgs[$ok])) echo '<div class="notice notice-success is-dismissible"><p>'.esc_html($msgs[$ok]).'</p></div>';
+        }
+        echo '<nav class="nfui-tabs">';
+        foreach ($tabs as $key => $t) {
+            $url = admin_url('admin.php?page=nf_console&tab=' . $key);
+            $active = ($key === $current) ? ' is-active' : '';
+            echo '<a class="nfui-tab'.$active.'" href="'.esc_url($url).'">'.esc_html($t['label']).'</a>';
+        }
+        echo '</nav>';
+
+        $renderer = $tabs[$current]['renderer'];
+        if (method_exists($this, $renderer)) {
+            $this->$renderer();
+        } else {
+            echo '<div class="nfui-card"><div class="nfui-card-bd"><p>该 Tab 内容即将上线。</p></div></div>';
+        }
+        echo '</div>';
+    }
+
+    /** Dashboard 页 */
+    public function dashboard_page() {
+        if (!current_user_can('manage_options')) return;
+        global $wpdb;
+
+        // 统计数据
+        $counts = wp_count_posts('newsflash');
+        $total = isset($counts->publish) ? (int)$counts->publish : 0;
+        $today = (int)$wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type=%s AND post_status='publish' AND DATE(post_date)=CURDATE()",
+            'newsflash'
+        ));
+        $tools_count = count(get_option('newsflash_recommend_tools', []));
+        $rec_settings = get_option('newsflash_recommend_settings', []);
+        $rec_enabled = !empty($rec_settings['enabled']);
+        $api_key = get_option('newsflash_api_key', '');
+
+        // 7 天发布趋势
+        $trend = $wpdb->get_results($wpdb->prepare(
+            "SELECT DATE(post_date) AS d, COUNT(*) AS c
+             FROM {$wpdb->posts}
+             WHERE post_type=%s AND post_status='publish'
+               AND post_date >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+             GROUP BY DATE(post_date)",
+            'newsflash'
+        ), OBJECT_K);
+        $days = [];
+        for ($i = 6; $i >= 0; $i--) {
+            $date = date('Y-m-d', strtotime("-{$i} days"));
+            $days[] = ['date' => $date, 'count' => isset($trend[$date]) ? (int)$trend[$date]->c : 0];
+        }
+        $max = max(1, max(array_column($days, 'count')));
+
+        // 最近 5 条
+        $recent = get_posts(['post_type'=>'newsflash','posts_per_page'=>5,'orderby'=>'date','order'=>'DESC']);
+
+        echo '<div class="wrap nfui-wrap"><h1>📊 NewsFlash 仪表盘 <span class="nfui-ver">v'.esc_html(NEWSFLASH_VERSION).'</span></h1>';
+
+        // ---- 4 统计卡 ----
+        echo '<div class="nfui-stat-grid">';
+        echo '<div class="nfui-stat"><div class="nfui-stat-label">总快讯数</div><div class="nfui-stat-value">'.number_format($total).'</div><div class="nfui-stat-sub">已发布</div></div>';
+        echo '<div class="nfui-stat"><div class="nfui-stat-label">今日发布</div><div class="nfui-stat-value">'.number_format($today).'</div><div class="nfui-stat-sub">'.esc_html(date('Y-m-d')).'</div></div>';
+        echo '<div class="nfui-stat"><div class="nfui-stat-label">推荐位工具</div><div class="nfui-stat-value">'.number_format($tools_count).'</div><div class="nfui-stat-sub">'.($rec_enabled ? '✓ 已启用' : '○ 未启用').'</div></div>';
+        echo '<div class="nfui-stat"><div class="nfui-stat-label">API 状态</div><div class="nfui-stat-value">'.($api_key ? '✓' : '✗').'</div><div class="nfui-stat-sub">'.($api_key ? 'Key 已配置' : '未配置').'</div></div>';
+        echo '</div>';
+
+        // ---- 7 天趋势图 ----
+        echo '<div class="nfui-card"><div class="nfui-card-hd">📈 最近 7 天发布趋势 <span class="nfui-meta">'.number_format(array_sum(array_column($days,'count'))).' 条</span></div><div class="nfui-card-bd" style="padding:0">';
+        echo '<div class="nfui-chart">';
+        foreach ($days as $d) {
+            $h = ($d['count'] / $max) * 100;
+            echo '<div class="nfui-chart-col">';
+            echo '<div class="nfui-chart-tip">'.esc_html($d['date']).'：'.(int)$d['count'].' 条</div>';
+            echo '<div class="nfui-chart-bar" data-count="'.(int)$d['count'].'" style="height:'.number_format($h,1,'.','').'%"></div>';
+            echo '</div>';
+        }
+        echo '</div>';
+        echo '<div class="nfui-chart-labels">';
+        foreach ($days as $d) {
+            echo '<div>'.esc_html(date('m/d', strtotime($d['date']))).'</div>';
+        }
+        echo '</div>';
+        echo '</div></div>';
+
+        // ---- 快速操作 ----
+        echo '<div class="nfui-card"><div class="nfui-card-hd">⚡ 快速操作</div><div class="nfui-card-bd"><div class="nfui-quick">';
+        echo '<a class="nfui-btn nfui-btn-p" href="'.esc_url(admin_url('post-new.php?post_type=newsflash')).'">＋ 发布新快讯</a>';
+        echo '<a class="nfui-btn nfui-btn-s" href="'.esc_url(admin_url('admin.php?page=nf_console&tab=recommend')).'">📌 管理推荐位</a>';
+        echo '<a class="nfui-btn nfui-btn-s" href="'.esc_url(admin_url('admin.php?page=nf_console&tab=display')).'">📰 模板设置</a>';
+        echo '<a class="nfui-btn nfui-btn-s" href="'.esc_url(admin_url('admin.php?page=nf_console&tab=api')).'">🔑 API 文档</a>';
+        echo '<a class="nfui-btn nfui-btn-s" href="'.esc_url(get_post_type_archive_link('newsflash')).'" target="_blank">🔗 查看时间线</a>';
+        echo '</div></div></div>';
+
+        // ---- 推荐位表现概览 ----
+        $rec_stats = get_option('newsflash_recommend_stats', []);
+        $tools_map = [];
+        foreach (get_option('newsflash_recommend_tools', []) as $tool) {
+            if (!empty($tool['id'])) $tools_map[$tool['id']] = $tool;
+        }
+        $total_v = $total_c = 0;
+        $rows = [];
+        foreach ($rec_stats as $tid => $s2) {
+            $v = (int)($s2['v'] ?? 0); $c = (int)($s2['c'] ?? 0);
+            $total_v += $v; $total_c += $c;
+            $name = isset($tools_map[$tid]) ? ($tools_map[$tid]['name'] ?? '') : '';
+            $cat  = isset($tools_map[$tid]) ? ($tools_map[$tid]['category'] ?? '') : '';
+            $logo = isset($tools_map[$tid]) ? ($tools_map[$tid]['logo'] ?? '') : '';
+            $deleted = !isset($tools_map[$tid]);
+            $rows[] = ['name' => $name ?: '(已删除工具)', 'cat' => $cat, 'logo' => $logo, 'v' => $v, 'c' => $c, 'deleted' => $deleted];
+        }
+        // 按点击量降序，相同时按曝光降序
+        usort($rows, function($a, $b) {
+            if ($b['c'] !== $a['c']) return $b['c'] - $a['c'];
+            return $b['v'] - $a['v'];
+        });
+
+        // 页面访问量（真实页面访问，非 产品×曝光）
+        $pv = get_option('newsflash_page_views', []);
+        $pv_single   = (int)($pv['single'] ?? 0);
+        $pv_timeline = (int)($pv['timeline'] ?? 0);
+        $pv_daily    = (int)($pv['daily'] ?? 0);
+        $pv_category = (int)($pv['category'] ?? 0);
+        $pv_total = $pv_single + $pv_timeline + $pv_daily + $pv_category;
+        // 整体 CTR = 总点击 / 页面访问量（更贴近"每次访问带来多少推荐位点击"）
+        $overall_ctr = $pv_total > 0 ? round($total_c / $pv_total * 100, 2) : 0;
+
+        echo '<div class="nfui-card"><div class="nfui-card-hd">📌 推荐位表现 <span class="nfui-meta">累计</span></div><div class="nfui-card-bd">';
+        echo '<div class="nfui-stat-grid" style="margin:0 0 16px">';
+        echo '<div class="nfui-stat"><div class="nfui-stat-label">页面访问</div><div class="nfui-stat-value">'.number_format($pv_total).'</div><div class="nfui-stat-sub">快讯页 + 时间线 + 盘点</div></div>';
+        echo '<div class="nfui-stat"><div class="nfui-stat-label">推荐位点击</div><div class="nfui-stat-value">'.number_format($total_c).'</div><div class="nfui-stat-sub">card click</div></div>';
+        echo '<div class="nfui-stat"><div class="nfui-stat-label">整体 CTR</div><div class="nfui-stat-value">'.$overall_ctr.'<span style="font-size:18px">%</span></div><div class="nfui-stat-sub">点击 / 页面访问</div></div>';
+        echo '</div>';
+        // 页面访问分项
+        echo '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">';
+        echo '<span class="nfui-bdg nfui-bdg-info" style="font-size:12px;padding:5px 12px">📄 快讯单页 '.number_format($pv_single).'</span>';
+        echo '<span class="nfui-bdg nfui-bdg-info" style="font-size:12px;padding:5px 12px">📰 时间线 '.number_format($pv_timeline).'</span>';
+        echo '<span class="nfui-bdg nfui-bdg-info" style="font-size:12px;padding:5px 12px">📅 每日盘点 '.number_format($pv_daily).'</span>';
+        echo '<span class="nfui-bdg nfui-bdg-info" style="font-size:12px;padding:5px 12px">🏷️ 分类页 '.number_format($pv_category).'</span>';
+        echo '</div>';
+
+        if ($rows) {
+            echo '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
+            echo '<div style="font-size:11px;color:var(--nfui-mut);text-transform:uppercase;letter-spacing:.06em;font-weight:600">📋 完整工具数据 · '.count($rows).' 个</div>';
+            echo '<a href="'.esc_url(admin_url('admin.php?page=nf_console&tab=recommend')).'" style="font-size:12px;color:var(--nfui-p);text-decoration:none;font-weight:500">详细管理 →</a>';
+            echo '</div>';
+            echo '<div style="max-height:420px;overflow-y:auto;border:1px solid var(--nfui-brd-soft);border-radius:var(--nfui-r-md)">';
+            echo '<table class="nfui-tbl" style="margin:0">';
+            echo '<thead style="position:sticky;top:0;z-index:1"><tr>';
+            echo '<th style="width:36px;text-align:center">#</th>';
+            echo '<th>工具</th>';
+            echo '<th style="width:90px">分类</th>';
+            echo '<th style="width:90px;text-align:right">曝光</th>';
+            echo '<th style="width:90px;text-align:right">点击</th>';
+            echo '<th style="width:80px;text-align:right">CTR</th>';
+            echo '</tr></thead><tbody>';
+            foreach ($rows as $i => $r) {
+                $rctr = $r['v'] > 0 ? round($r['c'] / $r['v'] * 100, 1) : 0;
+                $medal = $i === 0 ? '🥇' : ($i === 1 ? '🥈' : ($i === 2 ? '🥉' : ($i + 1)));
+                $logo_html = !empty($r['logo']) ? '<img src="'.esc_url($r['logo']).'" alt="" style="width:20px;height:20px;border-radius:4px;object-fit:contain;background:var(--nfui-bg);border:1px solid var(--nfui-brd-soft)">' : '<span style="display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;font-size:12px;background:var(--nfui-bg);border-radius:4px;border:1px solid var(--nfui-brd-soft)">🔧</span>';
+                $name_style = $r['deleted'] ? 'color:var(--nfui-mut);text-decoration:line-through' : '';
+                echo '<tr>';
+                echo '<td style="text-align:center;font-weight:600;color:var(--nfui-mut);font-size:12px">'.$medal.'</td>';
+                echo '<td><div style="display:flex;align-items:center;gap:8px">'.$logo_html.'<span style="font-weight:500;'.$name_style.'">'.esc_html($r['name']).'</span></div></td>';
+                echo '<td>'.($r['cat'] ? '<span class="nfui-bdg nfui-bdg-info">'.esc_html($r['cat']).'</span>' : '<span style="color:var(--nfui-mut);font-size:11px">—</span>').'</td>';
+                echo '<td style="text-align:right;font-variant-numeric:tabular-nums">'.number_format($r['v']).'</td>';
+                echo '<td style="text-align:right;font-variant-numeric:tabular-nums;font-weight:600">'.number_format($r['c']).'</td>';
+                echo '<td style="text-align:right;font-variant-numeric:tabular-nums;font-weight:700;color:var(--nfui-p)">'.$rctr.'%</td>';
+                echo '</tr>';
+            }
+            echo '</tbody></table></div>';
+        } else {
+            echo '<div style="text-align:center;padding:32px;color:var(--nfui-mut);background:var(--nfui-bg-soft);border-radius:var(--nfui-r-md)">暂无统计数据。等用户开始访问带推荐位的页面后，数据会在此累积。</div>';
+        }
+        echo '</div></div>';
+
+        // ---- 最近 5 条 ----
+        echo '<div class="nfui-card"><div class="nfui-card-hd">📰 最近 5 条快讯 <span class="nfui-meta">'.number_format($total).' 总数</span></div><div class="nfui-card-bd" style="padding:0">';
+        if ($recent) {
+            echo '<table class="nfui-tbl nfui-recent"><tbody>';
+            foreach ($recent as $p) {
+                echo '<tr>';
+                echo '<td class="date">'.esc_html(get_the_date('Y-m-d H:i', $p)).'</td>';
+                echo '<td><a href="'.esc_url(get_edit_post_link($p->ID)).'">'.esc_html($p->post_title ?: '（无标题）').'</a></td>';
+                echo '<td style="text-align:right"><a class="nfui-btn nfui-btn-s nfui-btn-sm" href="'.esc_url(get_permalink($p->ID)).'" target="_blank">查看</a></td>';
+                echo '</tr>';
+            }
+            echo '</tbody></table>';
+        } else {
+            echo '<div style="padding:40px;text-align:center;color:var(--nfui-mut)">暂无快讯，<a href="'.esc_url(admin_url('post-new.php?post_type=newsflash')).'">立即发布第一条</a></div>';
+        }
+        echo '</div></div>';
+
+        echo '</div>';
+    }
+
+    /** Tab 1: 模板与显示（迁移自老 settings_page） */
+    private function render_tab_display() {
+        // 处理 POST（与老 settings_page 一致逻辑，但 redirect 回 console tab）
+        if (isset($_POST['save']) && wp_verify_nonce($_POST['nonce'] ?? '', 'nf_settings')) {
+            update_option('newsflash_settings', [
+                'article_template'  => sanitize_text_field($_POST['at'] ?? 'sina'),
+                'timeline_template' => sanitize_text_field($_POST['tt'] ?? 'sina'),
+                'timeline_position' => sanitize_text_field($_POST['tp'] ?? 'left'),
+                'show_footer'       => !empty($_POST['sf']),
+                'posts_per_page'    => max(1, (int)($_POST['pp'] ?? 10)),
+                'custom_css'        => wp_strip_all_tags(wp_unslash($_POST['css'] ?? '')),
+            ]);
+            echo '<div class="notice notice-success is-dismissible"><p>✅ 已保存</p></div>';
+        }
+        $s = get_option('newsflash_settings', []);
+        $tpls = ['sina'=>'📰新浪财经','default'=>'⚪简约白','dark'=>'⚫暗夜','cyberpunk'=>'🟣赛博朋克','glass'=>'🔵毛玻璃','pro'=>'💼专业商务','tech'=>'🚀科技感','bloomberg'=>'📊Bloomberg','elegant'=>'✨优雅','premium'=>'💎Premium','minimal'=>'⬜极简','editorial'=>'📝编辑风','brutalist'=>'🧱粗野主义','retro'=>'📜复古','neon'=>'🌈霓虹','nature'=>'🌿自然','luxury'=>'👑奢侈品','startup'=>'🚀创业风','govt'=>'🏛️政府','magazine'=>'📰杂志','custom'=>'🎨自定义'];
+
+        echo '<form method="post" action="'.esc_url(admin_url('admin.php?page=nf_console&tab=display')).'">';
+        echo wp_nonce_field('nf_settings', 'nonce', true, false);
+
+        echo '<div class="nfui-card"><div class="nfui-card-hd">📰 模板</div><div class="nfui-card-bd">';
+        echo '<div class="nfui-row"><label>文章模板</label><select name="at" class="nfui-select" style="min-width:200px">';
+        foreach ($tpls as $k => $v) echo '<option value="'.esc_attr($k).'"'.selected($s['article_template'] ?? 'sina', $k, false).'>'.esc_html($v).'</option>';
+        echo '</select></div>';
+        echo '<div class="nfui-row"><label>时间线模板</label><select name="tt" class="nfui-select" style="min-width:200px">';
+        foreach ($tpls as $k => $v) echo '<option value="'.esc_attr($k).'"'.selected($s['timeline_template'] ?? 'sina', $k, false).'>'.esc_html($v).'</option>';
+        echo '</select></div>';
+        echo '<div class="nfui-row"><label>时间线位置</label><select name="tp" class="nfui-select"><option value="left"'.selected($s['timeline_position'] ?? 'left', 'left', false).'>左</option><option value="center"'.selected($s['timeline_position'] ?? 'left', 'center', false).'>中</option><option value="right"'.selected($s['timeline_position'] ?? 'left', 'right', false).'>右</option></select></div>';
+        echo '<div class="nfui-row"><label>每页数量</label><input type="number" name="pp" class="nfui-input" min="1" max="100" style="width:80px" value="'.esc_attr($s['posts_per_page'] ?? 10).'"></div>';
+        echo '<div class="nfui-row"><label>显示页脚</label><label class="nfui-toggle"><input type="checkbox" name="sf" value="1"'.checked(!empty($s['show_footer']), true, false).'><span class="nfui-tg-slot"></span></label></div>';
+        echo '</div></div>';
+
+        echo '<p style="margin:0"><button type="submit" name="save" class="nfui-btn nfui-btn-p">保存</button></p>';
+        echo '</form>';
+    }
+    /** Tab 2: 推荐位（迁移自老 recommend_page，全套 UI 重写为 nfui-* 组件） */
+    private function render_tab_recommend() {
+        $s     = get_option('newsflash_recommend_settings', []);
+        $tools = get_option('newsflash_recommend_tools', []);
+        $cats  = get_option('newsflash_recommend_categories', []);
+        $stats = get_option('newsflash_recommend_stats', []);
+        $all_tools = $tools;
+
+        // 筛选
+        $filter_cat    = sanitize_text_field($_GET['cat'] ?? '');
+        $filter_status = sanitize_text_field($_GET['status'] ?? '');
+        if ($filter_cat || $filter_status) {
+            $tools = array_filter($tools, function($t) use ($filter_cat, $filter_status) {
+                if ($filter_cat && ($t['category'] ?? '') !== $filter_cat) return false;
+                if ($filter_status === 'enabled' && empty($t['enabled'])) return false;
+                if ($filter_status === 'disabled' && !empty($t['enabled'])) return false;
+                return true;
+            });
+        }
+        usort($tools, function($a, $b) { return intval($b['priority'] ?? 0) - intval($a['priority'] ?? 0); });
+
+        $cat_counts = array_count_values(array_map(function($t){ return $t['category'] ?? ''; }, $all_tools));
+        $action_url = esc_url(admin_url('admin.php?page=nf_console&tab=recommend'));
+
+        // ---- 全局设置（折叠）----
+        echo '<div class="nfui-card"><div class="nfui-card-hd">⚙️ 全局设置</div><div class="nfui-card-bd">';
+        echo '<form method="post" action="'.$action_url.'">'.wp_nonce_field('nr','nr',true,false);
+        echo '<div class="nfui-grid">';
+        echo '<div class="nfui-row"><label>启用推荐位</label><label class="nfui-toggle"><input type="checkbox" name="en" value="1"'.checked(!empty($s['enabled']),true,false).'><span class="nfui-tg-slot"></span></label></div>';
+        echo '<div class="nfui-row"><label>标题</label><input type="text" name="title" class="nfui-input" value="'.esc_attr($s['title'] ?? '热门AI工具推荐').'" style="width:160px"></div>';
+        echo '<div class="nfui-row"><label>显示位置</label><select name="pos" class="nfui-select"><option value="bottom"'.selected($s['position']??'bottom','bottom',false).'>页面底部</option><option value="top"'.selected($s['position']??'bottom','top',false).'>页面顶部</option><option value="both"'.selected($s['position']??'bottom','both',false).'>顶部 + 底部</option></select></div>';
+        echo '<div class="nfui-row"><label>默认每行</label><select name="pr" class="nfui-select" style="width:80px">';
+        for ($i = 4; $i <= 8; $i++) echo '<option value="'.$i.'"'.selected($s['per_row']??6,$i,false).'>'.$i.'</option>';
+        echo '</select></div>';
+        echo '<div class="nfui-row"><label>显示 Logo</label><label class="nfui-toggle"><input type="checkbox" name="sl" value="1"'.checked(!empty($s['show_logo']),true,false).'><span class="nfui-tg-slot"></span></label></div>';
+        echo '<div class="nfui-row"><label>显示简介</label><label class="nfui-toggle"><input type="checkbox" name="sd" value="1"'.checked(!empty($s['show_description']),true,false).'><span class="nfui-tg-slot"></span></label></div>';
+        echo '<div class="nfui-row"><label>显示按钮</label><label class="nfui-toggle"><input type="checkbox" name="sc" value="1"'.checked(!empty($s['show_cta']),true,false).'><span class="nfui-tg-slot"></span></label></div>';
+        echo '<div class="nfui-row"><label>按钮文字</label><input type="text" name="ct" class="nfui-input" value="'.esc_attr($s['cta_text'] ?? '访问').'" style="width:80px"></div>';
+        echo '<div class="nfui-row"><label>背景色</label><input type="color" name="bg" value="'.esc_attr($s['card_bg'] ?? '#ffffff').'" style="width:36px;height:28px;border:1px solid var(--nfui-brd);border-radius:4px;cursor:pointer"></div>';
+        echo '<div class="nfui-row"><label>卡片样式</label><select name="cs" class="nfui-select"><option value="card"'.selected($s['card_style']??'card','card',false).'>标准</option><option value="compact"'.selected($s['card_style']??'card','compact',false).'>紧凑</option><option value="highlight"'.selected($s['card_style']??'card','highlight',false).'>突出</option><option value="minimal"'.selected($s['card_style']??'card','minimal',false).'>简约</option></select></div>';
+        echo '</div>';
+
+        // 页面类型设置
+        echo '<h4 style="margin:20px 0 10px;font-size:13px;color:var(--nfui-txt);padding-top:16px;border-top:1px dashed var(--nfui-brd)">📍 各页面类型独立设置</h4>';
+        echo '<div class="nfui-grid-4">';
+        $page_types = [
+            'single'   => ['icon' => '📄', 'label' => '快讯单页'],
+            'timeline' => ['icon' => '📰', 'label' => '时间线页'],
+            'daily'    => ['icon' => '📅', 'label' => '每日盘点'],
+            'category' => ['icon' => '🏷️', 'label' => '分类页'],
+        ];
+        foreach ($page_types as $pt => $info) {
+            $show_key = 'show_' . $pt;
+            $row_key  = 'per_row_' . $pt;
+            echo '<div class="nfui-pagetype-card">';
+            echo '<div class="nfui-pagetype-card-hd">';
+            echo '<span class="title">'.$info['icon'].' '.esc_html($info['label']).'</span>';
+            echo '<label class="nfui-toggle"><input type="checkbox" name="'.$show_key.'" value="1"'.checked(!empty($s[$show_key]),true,false).'><span class="nfui-tg-slot"></span></label>';
+            echo '</div>';
+            echo '<div class="nfui-pagetype-card-row"><label>每行</label><select name="'.$row_key.'" class="nfui-select" style="padding:4px 8px">';
+            for ($i = 4; $i <= 8; $i++) echo '<option value="'.$i.'"'.selected($s[$row_key]??6,$i,false).'>'.$i.'</option>';
+            echo '</select></div>';
+            echo '</div>';
+        }
+        echo '</div>';
+
+        echo '<p style="margin:16px 0 0"><button type="submit" name="save_set" class="nfui-btn nfui-btn-p">保存设置</button></p>';
+        echo '</form></div></div>';
+
+        // ---- 分类管理 ----
+        echo '<div class="nfui-card"><div class="nfui-card-hd">🏷️ 分类 <span class="nfui-meta">'.count($cats).'</span></div><div class="nfui-card-bd">';
+        echo '<div class="nfui-cats">';
+        foreach ($cats as $c) {
+            $cnt = $cat_counts[$c] ?? 0;
+            echo '<span class="nfui-cat">'.esc_html($c).'<span class="cnt">'.$cnt.'</span><form method="post" action="'.$action_url.'" style="display:inline">'.wp_nonce_field('nr','nr',true,false).'<input type="hidden" name="c" value="'.esc_attr($c).'"><span class="del" onclick="if(confirm(\'删除分类「'.esc_js($c).'」？该分类下的工具会被一并删除\'))this.parentElement.submit()">×</span></form></span>';
+        }
+        echo '</div>';
+        echo '<form method="post" action="'.$action_url.'" style="display:flex;gap:8px">'.wp_nonce_field('nr','nr',true,false);
+        echo '<input type="text" name="nc" class="nfui-input" placeholder="新分类名称" required style="flex:1;max-width:240px">';
+        echo '<button type="submit" name="add_c" class="nfui-btn nfui-btn-s">添加</button>';
+        echo '</form></div></div>';
+
+        // ---- 工具表 ----
+        echo '<div class="nfui-card"><div class="nfui-card-hd">📋 工具 <span class="nfui-meta">'.count($all_tools).' 个，当前显示 '.count($tools).'</span></div><div class="nfui-card-bd">';
+
+        // 筛选条
+        echo '<div class="nfui-tbar">';
+        echo '<form method="get" style="display:flex;gap:8px;flex:1"><input type="hidden" name="page" value="nf_console"><input type="hidden" name="tab" value="recommend">';
+        echo '<select name="cat" onchange="this.form.submit()" class="nfui-select"><option value="">全部分类</option>';
+        foreach ($cats as $c) echo '<option value="'.esc_attr($c).'"'.selected($filter_cat,$c,false).'>'.esc_html($c).'</option>';
+        echo '</select>';
+        echo '<select name="status" onchange="this.form.submit()" class="nfui-select"><option value="">全部状态</option><option value="enabled"'.selected($filter_status,'enabled',false).'>启用</option><option value="disabled"'.selected($filter_status,'disabled',false).'>禁用</option></select>';
+        if ($filter_cat || $filter_status) echo '<a href="'.$action_url.'" class="nfui-btn nfui-btn-s nfui-btn-sm">清除筛选</a>';
+        echo '</form></div>';
+
+        // 批量操作 form
+        echo '<form method="post" action="'.$action_url.'" id="bulk-form">'.wp_nonce_field('nr','nr',true,false);
+        echo '<div class="nfui-bulk" id="nfui-bulk-bar"><span>已选 <strong id="nfui-sel-cnt">0</strong> 个</span>';
+        echo '<select name="bulk_action" class="nfui-select" required><option value="">批量操作…</option><option value="enable">启用</option><option value="disable">禁用</option><option value="delete">删除</option></select>';
+        echo '<button type="submit" class="nfui-btn nfui-btn-s nfui-btn-sm" onclick="return this.form.bulk_action.value!==\'delete\'||confirm(\'确定批量删除选中工具？\')">应用</button>';
+        echo '</div>';
+
+        // 表格
+        echo '<table class="nfui-tbl"><thead><tr>';
+        echo '<th style="width:32px"><input type="checkbox" id="nfui-check-all"></th>';
+        echo '<th style="width:60px" title="数字越大越靠前">排序↓</th>';
+        echo '<th>工具</th><th style="width:90px">分类</th><th>链接</th><th>简介</th>';
+        echo '<th style="width:120px" title="曝光 / 点击 / CTR">📊 数据</th>';
+        echo '<th style="width:60px">状态</th><th style="width:100px">操作</th>';
+        echo '</tr></thead><tbody>';
+
+        if (empty($tools)) {
+            echo '<tr><td colspan="9" style="text-align:center;color:var(--nfui-mut);padding:32px">'.($all_tools ? '当前筛选条件下无结果' : '暂无工具，下方添加第一个').'</td></tr>';
+        }
+        foreach ($tools as $t) {
+            $id = esc_attr($t['id'] ?? '');
+            echo '<tr class="'.(empty($t['enabled']) ? 'is-off' : '').'">';
+            echo '<td><input type="checkbox" name="tool_ids[]" value="'.$id.'" class="nfui-tool-cb" onchange="nfuiUpdateBulk()"></td>';
+            echo '<td><input type="number" value="'.esc_attr($t['priority'] ?? 0).'" class="nfui-input" style="width:54px;padding:3px 6px;text-align:center" min="0" max="1000" onchange="nfuiToggleQuick(\''.$id.'\');document.querySelector(\'#nfui-qe-'.$id.' input[name=priority]\').value=this.value"></td>';
+            echo '<td><div class="nfui-tool-nm"><div class="nfui-tool-logo">'.(!empty($t['logo']) ? '<img src="'.esc_url($t['logo']).'" alt="">' : '🔧').'</div><div><span class="nfui-tool-name">'.esc_html($t['name'] ?? '').'</span></div></div></td>';
+            echo '<td><span class="nfui-bdg nfui-bdg-info">'.esc_html($t['category'] ?? '').'</span></td>';
+            echo '<td><a href="'.esc_url($t['url'] ?? '#').'" target="_blank" class="nfui-tool-url">'.esc_html($t['url'] ?? '').'</a></td>';
+            echo '<td class="nfui-tool-desc">'.esc_html($t['description'] ?? '').'</td>';
+            // 数据列：曝光 / 点击 / CTR
+            $tv = (int)($stats[$t['id'] ?? '']['v'] ?? 0);
+            $tc = (int)($stats[$t['id'] ?? '']['c'] ?? 0);
+            $ctr = $tv > 0 ? round($tc / $tv * 100, 1) : 0;
+            echo '<td><div style="display:flex;flex-direction:column;gap:2px;font-size:11px;line-height:1.4">';
+            echo '<span title="曝光"><span style="color:var(--nfui-mut)">👁</span> '.number_format($tv).'</span>';
+            echo '<span title="点击 / CTR"><span style="color:var(--nfui-mut)">🖱</span> '.number_format($tc).' <span style="color:var(--nfui-p);font-weight:600">'.$ctr.'%</span></span>';
+            echo '</div></td>';
+            echo '<td><span class="nfui-bdg '.(!empty($t['enabled']) ? 'nfui-bdg-on' : 'nfui-bdg-off').'">'.(!empty($t['enabled']) ? '启用' : '禁用').'</span></td>';
+            echo '<td><div class="nfui-acts">';
+            echo '<a href="javascript:void(0)" class="nfui-btn nfui-btn-s nfui-btn-sm" onclick="nfuiToggleQuick(\''.$id.'\')">编辑</a>';
+            echo '<form method="post" action="'.$action_url.'" style="display:inline">'.wp_nonce_field('nr','nr',true,false).'<input type="hidden" name="id" value="'.$id.'"><button type="submit" name="tog_t" class="nfui-btn nfui-btn-s nfui-btn-sm">'.(!empty($t['enabled']) ? '禁' : '启').'</button></form>';
+            echo '<form method="post" action="'.$action_url.'" style="display:inline" onsubmit="return confirm(\'确定删除「'.esc_js($t['name'] ?? '').'」？\')">'.wp_nonce_field('nr','nr',true,false).'<input type="hidden" name="id" value="'.$id.'"><button type="submit" name="del_t" class="nfui-btn nfui-btn-danger nfui-btn-sm">删</button></form>';
+            echo '</div>';
+            // 行内编辑表单
+            echo '<div id="nfui-qe-'.$id.'" class="nfui-quick-edit"><form method="post" action="'.$action_url.'">'.wp_nonce_field('nr','nr',true,false).'<input type="hidden" name="id" value="'.$id.'"><input type="hidden" name="upd_t" value="1">';
+            echo '<div class="nfui-quick-edit-grid">';
+            echo '<div class="f"><label>分类</label><select name="category">';
+            foreach ($cats as $c) echo '<option value="'.esc_attr($c).'"'.selected($t['category'] ?? '', $c, false).'>'.esc_html($c).'</option>';
+            echo '</select></div>';
+            echo '<div class="f"><label>名称</label><input type="text" name="name" value="'.esc_attr($t['name'] ?? '').'" required></div>';
+            echo '<div class="f"><label>链接</label><input type="url" name="url" value="'.esc_attr($t['url'] ?? '').'" required></div>';
+            echo '<div class="f"><label>Logo URL</label><input type="url" name="logo" value="'.esc_attr($t['logo'] ?? '').'"></div>';
+            echo '<div class="f"><label>简介</label><input type="text" name="description" value="'.esc_attr($t['description'] ?? '').'"></div>';
+            echo '<div class="f"><label>排序</label><input type="number" name="priority" value="'.esc_attr($t['priority'] ?? 0).'" min="0" max="1000"></div>';
+            echo '<div style="display:flex;gap:5px;grid-column:span 6"><button type="submit" class="nfui-btn nfui-btn-p nfui-btn-sm">保存</button><button type="button" class="nfui-btn nfui-btn-s nfui-btn-sm" onclick="nfuiToggleQuick(\''.$id.'\')">取消</button></div>';
+            echo '</div></form></div>';
+            echo '</td></tr>';
+        }
+        echo '</tbody></table></form>';
+
+        // 添加表单
+        echo '<form method="post" action="'.$action_url.'" class="nfui-add-form">'.wp_nonce_field('nr','nr',true,false);
+        echo '<div class="f"><label>分类</label><select name="tc" required class="nfui-select"><option value="">选择…</option>';
+        foreach ($cats as $c) echo '<option value="'.esc_attr($c).'">'.esc_html($c).'</option>';
+        echo '</select></div>';
+        echo '<div class="f"><label>名称</label><input type="text" name="tn" class="nfui-input" placeholder="工具名称" required></div>';
+        echo '<div class="f"><label>链接</label><input type="url" name="tu" class="nfui-input" placeholder="https://…" required></div>';
+        echo '<div class="f"><label>Logo URL</label><input type="url" name="tl" class="nfui-input" placeholder="图标地址（可选）"></div>';
+        echo '<div><label>&nbsp;</label><button type="submit" name="add_t" class="nfui-btn nfui-btn-p" style="width:100%">＋ 添加工具</button></div>';
+        echo '</form>';
+
+        echo '</div></div>';
+    }
+    /** Tab 3: API（迁移自老 api_docs_page，扩展端点速查） */
+    private function render_tab_api() {
+        // 重置 Key 处理
+        if (isset($_POST['reset_key']) && wp_verify_nonce($_POST['nonce'] ?? '', 'nf_settings')) {
+            update_option('newsflash_api_key', wp_generate_uuid4());
+            echo '<div class="notice notice-success is-dismissible"><p>✅ API Key 已重置</p></div>';
+        }
+        $key = get_option('newsflash_api_key', '');
+        $base = rest_url('newsflash/v1');
+
+        echo '<div class="nfui-card"><div class="nfui-card-hd">🔑 API Key</div><div class="nfui-card-bd">';
+        echo '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">';
+        echo '<code class="nfui-key">'.esc_html($key ?: '（未生成）').'</code>';
+        echo '<button type="button" class="nfui-btn nfui-btn-s nfui-btn-sm" onclick="nfuiCopy(\''.esc_js($key).'\', this)">📋 复制</button>';
+        echo '<form method="post" style="display:inline">'.wp_nonce_field('nf_settings','nonce',true,false);
+        echo '<button type="submit" name="reset_key" class="nfui-btn nfui-btn-danger nfui-btn-sm" onclick="return confirm(\'确定重置 API Key？所有使用旧 Key 的客户端将失效\')">🔄 重置</button>';
+        echo '</form></div>';
+        echo '<p style="color:var(--nfui-mut);font-size:12px;margin-top:12px">请求时在 Header 中携带 <code>X-NewsFlash-Key</code>。</p>';
+        echo '</div></div>';
+
+        echo '<div class="nfui-card"><div class="nfui-card-hd">📡 接口速查</div><div class="nfui-card-bd">';
+        echo '<table class="nfui-tbl" style="margin:-8px 0"><thead><tr><th style="width:60px">方法</th><th>路径</th><th>用途</th></tr></thead><tbody>';
+        echo '<tr><td><span class="nfui-bdg nfui-bdg-info">POST</span></td><td><code>/posts</code></td><td>创建快讯（需 Key）</td></tr>';
+        echo '<tr><td><span class="nfui-bdg" style="background:#fef3c7;color:#92400e">GET</span></td><td><code>/posts/{id}</code></td><td>读取快讯</td></tr>';
+        echo '<tr><td><span class="nfui-bdg" style="background:#fef3c7;color:#92400e">GET</span></td><td><code>/categories</code></td><td>分类列表</td></tr>';
+        echo '<tr><td><span class="nfui-bdg" style="background:#fef3c7;color:#92400e">GET</span></td><td><code>/recommend-tools</code></td><td>推荐位工具列表</td></tr>';
+        echo '</tbody></table>';
+        echo '</div></div>';
+
+        echo '<div class="nfui-card"><div class="nfui-card-hd">💻 curl 示例</div><div class="nfui-card-bd">';
+        $sample = "curl -X POST ".$base."/posts \\\n"
+                . "  -H \"Content-Type: application/json\" \\\n"
+                . "  -H \"X-NewsFlash-Key: ".$key."\" \\\n"
+                . "  -d '{\n"
+                . "    \"title\": \"测试快讯\",\n"
+                . "    \"content\": \"<p>正文内容</p>\",\n"
+                . "    \"category\": [\"AI对话\"],\n"
+                . "    \"keywords\": \"AI,GPT\"\n"
+                . "  }'";
+        echo '<code class="nfui-code">'.esc_html($sample).'</code>';
+        echo '<p style="margin-top:8px"><button type="button" class="nfui-btn nfui-btn-s nfui-btn-sm" onclick="nfuiCopy(this.previousElementSibling.previousElementSibling.textContent, this)">📋 复制命令</button></p>';
+        echo '</div></div>';
+    }
+    /** Tab 4: 高级（自定义 CSS / 导入导出 / 重置） */
+    private function render_tab_advanced() {
+        // 自定义 CSS 单独保存
+        if (isset($_POST['save_css']) && wp_verify_nonce($_POST['nonce'] ?? '', 'nf_advanced')) {
+            $s = get_option('newsflash_settings', []);
+            $s['custom_css'] = wp_strip_all_tags(wp_unslash($_POST['css'] ?? ''));
+            update_option('newsflash_settings', $s);
+            echo '<div class="notice notice-success is-dismissible"><p>✅ 自定义 CSS 已保存</p></div>';
+        }
+        // 导出 JSON
+        if (isset($_POST['export']) && wp_verify_nonce($_POST['nonce'] ?? '', 'nf_advanced')) {
+            $payload = [
+                'version'    => NEWSFLASH_VERSION,
+                'exported_at'=> current_time('mysql'),
+                'recommend_settings'   => get_option('newsflash_recommend_settings', []),
+                'recommend_tools'      => get_option('newsflash_recommend_tools', []),
+                'recommend_categories' => get_option('newsflash_recommend_categories', []),
+                'recommend_stats'      => get_option('newsflash_recommend_stats', []),
+                'page_views'           => get_option('newsflash_page_views', []),
+            ];
+            nocache_headers();
+            header('Content-Type: application/json; charset=utf-8');
+            header('Content-Disposition: attachment; filename=newsflash-recommend-'.date('Ymd-His').'.json');
+            echo wp_json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        // 导入 JSON
+        if (isset($_POST['import']) && wp_verify_nonce($_POST['nonce'] ?? '', 'nf_advanced') && !empty($_FILES['import_file']['tmp_name'])) {
+            $raw = file_get_contents($_FILES['import_file']['tmp_name']);
+            $data = json_decode($raw, true);
+            if (is_array($data) && isset($data['recommend_settings'], $data['recommend_tools'], $data['recommend_categories'])) {
+                update_option('newsflash_recommend_settings', $data['recommend_settings']);
+                update_option('newsflash_recommend_tools', $data['recommend_tools']);
+                update_option('newsflash_recommend_categories', $data['recommend_categories']);
+                if (isset($data['recommend_stats']) && is_array($data['recommend_stats'])) {
+                    update_option('newsflash_recommend_stats', $data['recommend_stats'], false);
+                }
+                if (isset($data['page_views']) && is_array($data['page_views'])) {
+                    update_option('newsflash_page_views', $data['page_views'], false);
+                }
+                echo '<div class="notice notice-success is-dismissible"><p>✅ 已导入 '.count($data['recommend_tools']).' 个工具、'.count($data['recommend_categories']).' 个分类'.(isset($data['recommend_stats']) ? '、并合并统计数据' : '').'</p></div>';
+            } else {
+                echo '<div class="notice notice-error is-dismissible"><p>❌ JSON 格式不符（缺少 recommend_settings / recommend_tools / recommend_categories）</p></div>';
+            }
+        }
+        // 清空所有工具
+        if (isset($_POST['clear_tools']) && wp_verify_nonce($_POST['nonce'] ?? '', 'nf_advanced')) {
+            update_option('newsflash_recommend_tools', []);
+            echo '<div class="notice notice-success is-dismissible"><p>✅ 已清空所有推荐位工具</p></div>';
+        }
+        if (isset($_POST['clear_stats']) && wp_verify_nonce($_POST['nonce'] ?? '', 'nf_advanced')) {
+            update_option('newsflash_recommend_stats', [], false);
+            update_option('newsflash_page_views', ['single'=>0,'timeline'=>0,'daily'=>0,'category'=>0], false);
+            echo '<div class="notice notice-success is-dismissible"><p>✅ 已清空所有页面访问 / 点击统计</p></div>';
+        }
+
+        $s = get_option('newsflash_settings', []);
+
+        // ---- 自定义 CSS ----
+        echo '<div class="nfui-card"><div class="nfui-card-hd">🎨 自定义 CSS <span class="nfui-meta">前台页面追加样式</span></div><div class="nfui-card-bd">';
+        echo '<form method="post" action="'.esc_url(admin_url('admin.php?page=nf_console&tab=advanced')).'">'.wp_nonce_field('nf_advanced','nonce',true,false);
+        echo '<textarea name="css" class="nfui-textarea" placeholder="/* 在此输入 CSS，自动注入到所有快讯页面 */&#10;.nf-article-title { color: #1e6fff; }">'.esc_textarea($s['custom_css'] ?? '').'</textarea>';
+        echo '<p style="margin:10px 0 0"><button type="submit" name="save_css" class="nfui-btn nfui-btn-p">保存 CSS</button></p>';
+        echo '</form></div></div>';
+
+        // ---- 导入 / 导出 ----
+        echo '<div class="nfui-card"><div class="nfui-card-hd">💾 推荐位备份 <span class="nfui-meta">配置 + 工具 + 分类 一并打包</span></div><div class="nfui-card-bd">';
+        echo '<div class="nfui-grid-2">';
+        // 导出
+        echo '<form method="post"><h4 style="margin:0 0 8px;font-size:13px">导出 JSON</h4>';
+        echo '<p style="color:var(--nfui-mut);font-size:12px;margin:0 0 10px">下载当前推荐位完整配置（settings + tools + categories），用于备份或迁移到其他站点。</p>';
+        echo wp_nonce_field('nf_advanced','nonce',true,false);
+        echo '<button type="submit" name="export" class="nfui-btn nfui-btn-s">⬇️ 下载 .json</button>';
+        echo '</form>';
+        // 导入
+        echo '<form method="post" enctype="multipart/form-data"><h4 style="margin:0 0 8px;font-size:13px">导入 JSON</h4>';
+        echo '<p style="color:var(--nfui-mut);font-size:12px;margin:0 0 10px"><strong>会覆盖</strong>当前所有推荐位配置 / 工具 / 分类，请先导出备份。</p>';
+        echo wp_nonce_field('nf_advanced','nonce',true,false);
+        echo '<input type="file" name="import_file" accept=".json,application/json" required style="margin-bottom:8px;display:block">';
+        echo '<button type="submit" name="import" class="nfui-btn nfui-btn-s" onclick="return confirm(\'导入会覆盖当前所有推荐位数据，确定继续？\')">⬆️ 上传并导入</button>';
+        echo '</form>';
+        echo '</div></div></div>';
+
+        // ---- 危险操作 ----
+        echo '<div class="nfui-card" style="border-color:#fecaca"><div class="nfui-card-hd" style="background:linear-gradient(to bottom,#fef2f2,#fee2e2);color:#991b1b">⚠️ 危险操作</div><div class="nfui-card-bd">';
+        echo '<form method="post" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-bottom:14px;border-bottom:1px dashed var(--nfui-brd-soft);margin-bottom:14px">'.wp_nonce_field('nf_advanced','nonce',true,false);
+        echo '<div style="flex:1;min-width:200px"><strong>清空所有推荐位工具</strong><p style="color:var(--nfui-mut);font-size:12px;margin:2px 0 0">设置和分类保留，仅删除工具数据。不可恢复。</p></div>';
+        echo '<button type="submit" name="clear_tools" class="nfui-btn nfui-btn-danger" onclick="return confirm(\'确定清空所有推荐位工具？此操作不可恢复！\')">清空工具</button>';
+        echo '</form>';
+        // 清空统计
+        $stats_total = array_sum(array_map(function($x){ return (int)($x['v']??0)+(int)($x['c']??0); }, get_option('newsflash_recommend_stats', [])));
+        echo '<form method="post" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'.wp_nonce_field('nf_advanced','nonce',true,false);
+        echo '<div style="flex:1;min-width:200px"><strong>清空曝光 / 点击统计</strong><p style="color:var(--nfui-mut);font-size:12px;margin:2px 0 0">当前累计 '.number_format($stats_total).' 个事件。重置后从 0 重新累计。工具本身不受影响。</p></div>';
+        echo '<button type="submit" name="clear_stats" class="nfui-btn nfui-btn-danger" onclick="return confirm(\'确定清空所有曝光 / 点击统计？\')">重置统计</button>';
+        echo '</form>';
+        echo '</div></div>';
+    }
+
+
     public function handle_recommend_form() {
         if (!isset($_POST['nr']) || !wp_verify_nonce($_POST['nr'], 'nr')) return;
+        if (!current_user_can('manage_options')) return;
+
+        // 批量操作（v1.10.2 UI 还在但 handler 缺失）
+        if (!empty($_POST['bulk_action']) && !empty($_POST['tool_ids']) && is_array($_POST['tool_ids'])) {
+            $action = sanitize_text_field($_POST['bulk_action']);
+            $ids = array_map('sanitize_text_field', $_POST['tool_ids']);
+            $tools = get_option('newsflash_recommend_tools', []);
+            if ($action === 'delete') {
+                $tools = array_values(array_filter($tools, function($t) use ($ids) {
+                    return !in_array($t['id'] ?? '', $ids, true);
+                }));
+                update_option('newsflash_recommend_tools', $tools);
+                wp_safe_redirect(admin_url('admin.php?page=nf_console&tab=recommend&ok=8')); exit;
+            }
+            if ($action === 'enable' || $action === 'disable') {
+                foreach ($tools as &$t) {
+                    if (in_array($t['id'] ?? '', $ids, true)) {
+                        $t['enabled'] = ($action === 'enable');
+                    }
+                }
+                unset($t);
+                update_option('newsflash_recommend_tools', $tools);
+                $ok = ($action === 'enable') ? '9' : '10';
+                wp_safe_redirect(admin_url('admin.php?page=nf_console&tab=recommend&ok=' . $ok)); exit;
+            }
+        }
+
         if (isset($_POST['save_set'])) {
             update_option('newsflash_recommend_settings', [
                 'enabled'=>!empty($_POST['en']),
@@ -367,18 +1037,18 @@ final class NewsFlash_Plugin {
                 'per_row_daily'=>max(4,min(8,intval($_POST['per_row_daily']??6))),
                 'per_row_category'=>max(4,min(8,intval($_POST['per_row_category']??6))),
             ]);
-            wp_redirect(admin_url('admin.php?page=nf_recommend&ok=1')); exit;
+            wp_redirect(admin_url('admin.php?page=nf_console&tab=recommend&ok=1')); exit;
         }
-        if (isset($_POST['add_c'])) { $cats = get_option('newsflash_recommend_categories',[]); $n = sanitize_text_field($_POST['nc']); if ($n && !in_array($n,$cats)) { $cats[]=$n; update_option('newsflash_recommend_categories',$cats); } wp_redirect(admin_url('admin.php?page=nf_recommend&ok=2')); exit; }
-        if (isset($_POST['del_c'])) { $c = sanitize_text_field($_POST['c']); $cats = get_option('newsflash_recommend_categories',[]); $cats = array_values(array_filter($cats,function($x)use($c){return $x!==$c;})); update_option('newsflash_recommend_categories',$cats); $tools = get_option('newsflash_recommend_tools',[]); $tools = array_values(array_filter($tools,function($t)use($c){return($t['category']??'')!==$c;})); update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_recommend&ok=3')); exit; }
+        if (isset($_POST['add_c'])) { $cats = get_option('newsflash_recommend_categories',[]); $n = sanitize_text_field($_POST['nc']); if ($n && !in_array($n,$cats)) { $cats[]=$n; update_option('newsflash_recommend_categories',$cats); } wp_redirect(admin_url('admin.php?page=nf_console&tab=recommend&ok=2')); exit; }
+        if (isset($_POST['del_c'])) { $c = sanitize_text_field($_POST['c']); $cats = get_option('newsflash_recommend_categories',[]); $cats = array_values(array_filter($cats,function($x)use($c){return $x!==$c;})); update_option('newsflash_recommend_categories',$cats); $tools = get_option('newsflash_recommend_tools',[]); $tools = array_values(array_filter($tools,function($t)use($c){return($t['category']??'')!==$c;})); update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_console&tab=recommend&ok=3')); exit; }
         if (isset($_POST['add_t'])) {
             $tools = get_option('newsflash_recommend_tools',[]);
             $max_pri = 0; foreach($tools as $t) { $p = intval($t['priority']??0); if($p>$max_pri) $max_pri=$p; }
             $tools[] = ['id'=>uniqid(),'category'=>sanitize_text_field($_POST['tc']?:''),'name'=>sanitize_text_field($_POST['tn']?:''),'description'=>sanitize_textarea_field($_POST['td']?:''),'url'=>esc_url_raw($_POST['tu']?:''),'logo'=>esc_url_raw($_POST['tl']?:''),'priority'=>$max_pri+10,'enabled'=>true];
-            update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_recommend&ok=4')); exit;
+            update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_console&tab=recommend&ok=4')); exit;
         }
-        if (isset($_POST['del_t'])) { $id=sanitize_text_field($_POST['id']); $tools=get_option('newsflash_recommend_tools',[]); $tools=array_values(array_filter($tools,function($t)use($id){return($t['id']??'')!==$id;})); update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_recommend&ok=5')); exit; }
-        if (isset($_POST['tog_t'])) { $id=sanitize_text_field($_POST['id']); $tools=get_option('newsflash_recommend_tools',[]); foreach($tools as &$t) { if(($t['id']??'')==$id) $t['enabled']=empty($t['enabled']); } update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_recommend&ok=6')); exit; }
+        if (isset($_POST['del_t'])) { $id=sanitize_text_field($_POST['id']); $tools=get_option('newsflash_recommend_tools',[]); $tools=array_values(array_filter($tools,function($t)use($id){return($t['id']??'')!==$id;})); update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_console&tab=recommend&ok=5')); exit; }
+        if (isset($_POST['tog_t'])) { $id=sanitize_text_field($_POST['id']); $tools=get_option('newsflash_recommend_tools',[]); foreach($tools as &$t) { if(($t['id']??'')==$id) $t['enabled']=empty($t['enabled']); } update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_console&tab=recommend&ok=6')); exit; }
         if (isset($_POST['upd_t'])) {
             $id=sanitize_text_field($_POST['id']); $tools=get_option('newsflash_recommend_tools',[]);
             foreach($tools as &$t) { if(($t['id']??'')==$id) {
@@ -386,250 +1056,12 @@ final class NewsFlash_Plugin {
                 $t['description']=sanitize_textarea_field($_POST['description']??$t['description']); $t['url']=esc_url_raw($_POST['url']??$t['url']);
                 $t['logo']=esc_url_raw($_POST['logo']??$t['logo']); $t['priority']=intval($_POST['priority']??($t['priority']??0));
             }}
-            update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_recommend&ok=7')); exit;
+            update_option('newsflash_recommend_tools',$tools); wp_redirect(admin_url('admin.php?page=nf_console&tab=recommend&ok=7')); exit;
         }
     }
-    public function recommend_page() {
-        $s = get_option('newsflash_recommend_settings',[]);
-        $tools = get_option('newsflash_recommend_tools',[]);
-        $cats = get_option('newsflash_recommend_categories',[]);
-        $all_tools = $tools;
-        
-        $filter_cat = sanitize_text_field($_GET['cat'] ?? '');
-        $filter_status = sanitize_text_field($_GET['status'] ?? '');
-        if ($filter_cat || $filter_status) {
-            $tools = array_filter($tools, function($t) use ($filter_cat, $filter_status) {
-                if ($filter_cat && ($t['category'] ?? '') !== $filter_cat) return false;
-                if ($filter_status === 'enabled' && empty($t['enabled'])) return false;
-                if ($filter_status === 'disabled' && !empty($t['enabled'])) return false;
-                return true;
-            });
-        }
-        usort($tools, function($a,$b){ return (intval($b['priority']??0) - intval($a['priority']??0)); });
-        
-        echo '<div class="wrap"><h1>📌 AI工具推荐</h1>';
-        $msgs = [1=>'✅ 已保存',2=>'✅ 已添加',3=>'✅ 已删除',4=>'✅ 已添加',5=>'✅ 已删除',6=>'✅ 已切换',7=>'✅ 已更新',8=>'✅ 批量删除',9=>'✅ 批量启用',10=>'✅ 批量禁用'];
-        if (isset($_GET['ok']) && isset($msgs[$_GET['ok']])) echo '<div class="notice notice-success is-dismissible"><p>'.$msgs[$_GET['ok']].'</p></div>';
-        
-        echo '<style>
-        :root{--p:#4f46e5;--bg:#f8fafc;--card:#fff;--brd:#e2e8f0;--txt:#1e293b;--mut:#64748b;--r:12px}
-        .nf-card{background:var(--card);border-radius:var(--r);box-shadow:0 1px 3px rgba(0,0,0,.08);border:1px solid var(--brd);margin:20px 0;overflow:hidden}
-        .nf-hd{padding:14px 20px;border-bottom:1px solid var(--brd);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;background:linear-gradient(to bottom,#fff,#fafafa)}
-        .nf-bd{padding:20px}
-        .nf-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
-        .nf-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f0f0f0}
-        .nf-row:last-child{border-bottom:none}
-        .nf-tg{position:relative;width:40px;height:22px}
-        .nf-tg input{opacity:0;width:0;height:0}
-        .nf-tg .sl{position:absolute;cursor:pointer;inset:0;background:#cbd5e1;border-radius:22px;transition:.2s}
-        .nf-tg .sl:before{position:absolute;content:"";height:16px;width:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
-        .nf-tg input:checked+.sl{background:var(--p)}
-        .nf-tg input:checked+.sl:before{transform:translateX(18px)}
-        .nf-in{padding:6px 10px;border:1px solid var(--brd);border-radius:6px;font-size:13px}
-        .nf-btn{display:inline-flex;align-items:center;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:none;gap:5px}
-        .nf-btn-p{background:var(--p);color:#fff}
-        .nf-btn-p:hover{background:#4338ca}
-        .nf-btn-s{background:#fff;color:var(--txt);border:1px solid var(--brd)}
-        .nf-btn-sm{padding:5px 10px;font-size:12px}
-        .nf-cats{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
-        .nf-cat{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;background:var(--bg);border-radius:18px;font-size:12px}
-        .nf-cat:hover{background:#e2e8f0}
-        .nf-cat .cnt{font-size:9px;background:#cbd5e1;padding:1px 5px;border-radius:9px}
-        .nf-cat .del{width:14px;height:14px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:#e2e8f0;font-size:10px;cursor:pointer}
-        .nf-cat .del:hover{background:#fecaca;color:#dc2626}
-        .nf-tbl{width:100%;border-collapse:collapse;font-size:13px}
-        .nf-tbl th{text-align:left;padding:10px 14px;font-weight:600;color:var(--mut);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--brd);background:linear-gradient(to bottom,#f8fafc,#f1f5f9)}
-        .nf-tbl td{padding:10px 14px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
-        .nf-tbl tbody tr:hover td{background:#f8fafc}
-        .nf-tbl tbody tr:last-child td{border-bottom:none}
-        .nf-tbl tbody tr.off{opacity:.5}
-        .nf-bdg{display:inline-flex;padding:2px 8px;border-radius:16px;font-size:10px;font-weight:500}
-        .nf-bdg-on{background:#dcfce7;color:#166534}
-        .nf-bdg-off{background:#fee2e2;color:#991b1b}
-        .nf-bdg-info{background:#e0e7ff;color:#3730a3}
-        .nf-acts{display:flex;gap:3px;opacity:.5}
-        .nf-tbl tr:hover .nf-acts{opacity:1}
-        .nf-act{padding:3px 8px;border-radius:4px;font-size:11px;cursor:pointer;border:1px solid #ddd;background:#fff;color:var(--txt)}
-        .nf-act:hover{background:#f6f7f7}
-        .nf-act.danger{color:#dc2626;border-color:#fecaca}
-        .nf-qe{display:none;background:linear-gradient(135deg,#fefce8,#fef9c3);border:1px solid #fde68a;border-radius:6px;padding:12px;margin-top:8px}
-        .nf-qe.show{display:block;animation:slideDown .15s}
-        @keyframes slideDown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
-        .nf-qe-g{display:grid;grid-template-columns:1fr 1fr 2fr 2fr 60px auto;gap:8px;align-items:center}
-        .nf-qe-g .f label{font-size:9px;color:#92400e;font-weight:600;text-transform:uppercase;display:block;margin-bottom:2px}
-        .nf-qe-g .f input,.nf-qe-g .f select{padding:5px 7px;border:1px solid #fcd34d;border-radius:4px;font-size:12px;background:rgba(255,255,255,.8);width:100%;box-sizing:border-box}
-        .nf-add{display:grid;grid-template-columns:1fr 1.5fr 2fr 2fr auto;gap:10px;align-items:end;padding:16px;background:var(--bg);border-radius:var(--r);margin-top:14px}
-        .nf-add .f{display:flex;flex-direction:column;gap:3px}
-        .nf-add .f label{font-size:10px;color:var(--mut);font-weight:500}
-        .nf-tbar{display:flex;gap:10px;margin-bottom:14px}
-        .nf-bulk{display:none;align-items:center;gap:10px;padding:8px 14px;background:linear-gradient(135deg,#e0e7ff,#c7d2fe);border-radius:6px;margin-bottom:14px}
-        .nf-bulk.show{display:flex}
-        .nf-nm{display:flex;align-items:center;gap:8px}
-        .nf-logo{width:28px;height:28px;border-radius:5px;background:var(--bg);border:1px solid var(--brd);display:flex;align-items:center;justify-content:center;font-size:12px;overflow:hidden;flex-shrink:0}
-        .nf-logo img{width:100%;height:100%;object-fit:contain}
-        .nf-name{font-weight:600;font-size:12px}
-        .nf-name small{font-weight:400;color:var(--mut);font-size:9px}
-        .nf-url{max-width:160px;color:var(--p);text-decoration:none;font-size:11px;word-break:break-all;white-space:normal;line-height:1.4}
-        .nf-desc{color:var(--mut);font-size:11px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .nf-col{max-height:0;overflow:hidden;transition:max-height .2s}
-        .nf-col.open{max-height:300px}
-        </style>';
-        
-        echo '<div class="nf-card"><div class="nf-hd" onclick="document.getElementById(\'nf-set\').classList.toggle(\'open\')" style="cursor:pointer">⚙️ 设置 <span style="margin-left:auto;font-weight:400;font-size:10px;color:#94a3b8">展开 ▼</span></div>';
-        echo '<div id="nf-set" class="nf-col"><div class="nf-bd"><form method="post">'.wp_nonce_field('nr','nr',true,false);
-        echo '<div class="nf-grid">';
-        echo '<div class="nf-row"><label>启用</label><label class="nf-tg"><input type="checkbox" name="en" value="1"'.checked(!empty($s['enabled']),true,false).'><span class="sl"></span></label></div>';
-        echo '<div class="nf-row"><label>标题</label><input type="text" name="title" class="nf-in" value="'.esc_attr($s['title']??'热门AI工具推荐').'" style="width:140px"></div>';
-        echo '<div class="nf-row"><label>每行</label><select name="pr" class="nf-in" style="width:60px">'; for($i=4;$i<=8;$i++) echo '<option value="'.$i.'"'.selected($s['per_row']??6,$i,false).'>'.$i.'</option>'; echo '</select></div>';
-        echo '<div class="nf-row"><label>Logo</label><label class="nf-tg"><input type="checkbox" name="sl" value="1"'.checked(!empty($s['show_logo']),true,false).'><span class="sl"></span></label></div>';
-        echo '<div class="nf-row"><label>简介</label><label class="nf-tg"><input type="checkbox" name="sd" value="1"'.checked(!empty($s['show_description']),true,false).'><span class="sl"></span></label></div>';
-        echo '<div class="nf-row"><label>按钮</label><label class="nf-tg"><input type="checkbox" name="sc" value="1"'.checked(!empty($s['show_cta']),true,false).'><span class="sl"></span></label></div>';
-        echo '</div>';
-        echo '<div class="nf-row"><label>按钮文字</label><input type="text" name="ct" class="nf-in" value="'.esc_attr($s['cta_text']??'访问').'" style="width:70px"> <label style="margin-left:12px">背景色</label><input type="color" name="bg" value="'.esc_attr($s['card_bg']??'#ffffff').'" style="width:30px;height:24px;border:1px solid #ddd;border-radius:4px;cursor:pointer"></div>';
-        echo '<div class="nf-row"><label>卡片样式</label><select name="cs" class="nf-in" style="width:100px"><option value="card"'.selected($s['card_style']??'card','card',false).'>标准卡片</option><option value="compact"'.selected($s['card_style']??'card','compact',false).'>紧凑型</option><option value="highlight"'.selected($s['card_style']??'card','highlight',false).'>突出型</option><option value="minimal"'.selected($s['card_style']??'card','minimal',false).'>简约型</option></select></div>';
-        echo '<div class="nf-row"><label>显示位置</label><select name="pos" class="nf-in" style="width:120px"><option value="bottom"'.selected($s['position']??'bottom','bottom',false).'>页面底部</option><option value="top"'.selected($s['position']??'bottom','top',false).'>页面顶部</option><option value="both"'.selected($s['position']??'bottom','both',false).'>顶部+底部</option></select></div>';
-        echo '</div>';
-        
-        // 页面类型设置
-        echo '<div style="margin-top:16px;padding-top:16px;border-top:1px dashed #e2e8f0">';
-        echo '<h4 style="margin:0 0 12px;font-size:13px;color:#1e293b">📍 页面类型设置</h4>';
-        echo '<div class="nf-grid" style="grid-template-columns:repeat(2,1fr)">';
-        
-        // 快讯页面
-        echo '<div style="padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0">';
-        echo '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
-        echo '<span style="font-weight:600;font-size:12px">📄 快讯页面</span>';
-        echo '<label class="nf-tg"><input type="checkbox" name="show_single" value="1"'.checked(!empty($s['show_single']),true,false).'><span class="sl"></span></label>';
-        echo '</div>';
-        echo '<div style="display:flex;align-items:center;gap:8px;font-size:11px">';
-        echo '<label>每行卡片数</label>';
-        echo '<select name="per_row_single" class="nf-in" style="width:60px;padding:4px 6px;font-size:11px">';
-        for($i=4;$i<=8;$i++) echo '<option value="'.$i.'"'.selected($s['per_row_single']??6,$i,false).'>'.$i.'</option>';
-        echo '</select>';
-        echo '</div></div>';
-        
-        // 时间线页面
-        echo '<div style="padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0">';
-        echo '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
-        echo '<span style="font-weight:600;font-size:12px">📰 时间线页面</span>';
-        echo '<label class="nf-tg"><input type="checkbox" name="show_timeline" value="1"'.checked(!empty($s['show_timeline']),true,false).'><span class="sl"></span></label>';
-        echo '</div>';
-        echo '<div style="display:flex;align-items:center;gap:8px;font-size:11px">';
-        echo '<label>每行卡片数</label>';
-        echo '<select name="per_row_timeline" class="nf-in" style="width:60px;padding:4px 6px;font-size:11px">';
-        for($i=4;$i<=8;$i++) echo '<option value="'.$i.'"'.selected($s['per_row_timeline']??6,$i,false).'>'.$i.'</option>';
-        echo '</select>';
-        echo '</div></div>';
-        
-        // 每日盘点页面
-        echo '<div style="padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0">';
-        echo '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
-        echo '<span style="font-weight:600;font-size:12px">📅 每日盘点页面</span>';
-        echo '<label class="nf-tg"><input type="checkbox" name="show_daily" value="1"'.checked(!empty($s['show_daily']),true,false).'><span class="sl"></span></label>';
-        echo '</div>';
-        echo '<div style="display:flex;align-items:center;gap:8px;font-size:11px">';
-        echo '<label>每行卡片数</label>';
-        echo '<select name="per_row_daily" class="nf-in" style="width:60px;padding:4px 6px;font-size:11px">';
-        for($i=4;$i<=8;$i++) echo '<option value="'.$i.'"'.selected($s['per_row_daily']??6,$i,false).'>'.$i.'</option>';
-        echo '</select>';
-        echo '</div></div>';
-        
-        // 分类页面
-        echo '<div style="padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0">';
-        echo '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
-        echo '<span style="font-weight:600;font-size:12px">🏷️ 分类页面</span>';
-        echo '<label class="nf-tg"><input type="checkbox" name="show_category" value="1"'.checked(!empty($s['show_category']),true,false).'><span class="sl"></span></label>';
-        echo '</div>';
-        echo '<div style="display:flex;align-items:center;gap:8px;font-size:11px">';
-        echo '<label>每行卡片数</label>';
-        echo '<select name="per_row_category" class="nf-in" style="width:60px;padding:4px 6px;font-size:11px">';
-        for($i=4;$i<=8;$i++) echo '<option value="'.$i.'"'.selected($s['per_row_category']??6,$i,false).'>'.$i.'</option>';
-        echo '</select>';
-        echo '</div></div>';
-        
-        echo '</div></div>';
-        echo '<p style="margin:16px 0 0"><button type="submit" name="save_set" class="nf-btn nf-btn-p">保存设置</button></p></form></div></div></div>';
-        
-        echo '<div class="nf-card"><div class="nf-hd">🏷️ 分类 <span style="margin-left:auto;font-weight:400;font-size:10px;color:#94a3b8">'.count($cats).'</span></div><div class="nf-bd">';
-        echo '<div class="nf-cats">';
-        foreach($cats as $c){$cnt=0;foreach($all_tools as $t)if(($t['category']??'')==$c)$cnt++;
-            echo '<span class="nf-cat">'.esc_html($c).'<span class="cnt">'.$cnt.'</span><form method="post" style="display:inline">'.wp_nonce_field('nr','nr',true,false).'<input type="hidden" name="c" value="'.esc_attr($c).'"><span class="del" onclick="if(confirm(\'删除?\'))this.parentElement.submit()">×</span></form></span>';
-        }
-        echo '</div>';
-        echo '<form method="post" style="display:flex;gap:8px">'.wp_nonce_field('nr','nr',true,false).'<input type="text" name="nc" class="nf-in" placeholder="新分类" required style="flex:1;max-width:240px"><button type="submit" name="add_c" class="nf-btn nf-btn-s">添加</button></form></div></div>';
-        
-        echo '<div class="nf-card"><div class="nf-hd">📋 工具 <span style="margin-left:auto;font-weight:400;font-size:10px;color:#94a3b8">'.count($tools).'</span></div><div class="nf-bd">';
-        
-        echo '<div class="nf-tbar"><form method="get" style="display:flex;gap:8px;flex:1"><input type="hidden" name="page" value="nf_recommend">';
-        echo '<select name="cat" onchange="this.form.submit()" class="nf-in"><option value="">全部</option>'; foreach($cats as $c) echo '<option value="'.esc_attr($c).'"'.selected($filter_cat,$c,false).'>'.esc_html($c).'</option>'; echo '</select>';
-        echo '<select name="status" onchange="this.form.submit()" class="nf-in"><option value="">状态</option><option value="enabled"'.selected($filter_status,'enabled',false).'>启用</option><option value="disabled"'.selected($filter_status,'disabled',false).'>禁用</option></select></form></div>';
-        
-        echo '<form method="post" id="bulk-form">'.wp_nonce_field('nr','nr',true,false);
-        echo '<div class="nf-bulk" id="bulk-bar"><span>已选 <strong id="sel-cnt">0</strong></span><select name="bulk_action" class="nf-in"><option value="">操作</option><option value="enable">启用</option><option value="disable">禁用</option><option value="delete">删除</option></select><button type="submit" class="nf-btn nf-btn-s nf-btn-sm">应用</button></div>';
-        
-        echo '<table class="nf-tbl"><thead><tr>';
-        echo '<th style="width:32px"><input type="checkbox" id="check-all" onchange="document.querySelectorAll(\'.tool-cb\').forEach(c=>c.checked=this.checked);upd()"></th>';
-        echo '<th style="width:50px" title="数字越大越靠前">排序↓</th><th>工具</th><th style="width:80px">分类</th><th>链接</th><th>简介</th><th style="width:60px">状态</th><th style="width:90px">操作</th></tr></thead><tbody>';
-        
-        foreach($tools as $t){
-            $id=esc_attr($t['id']??'');
-            echo '<tr class="'.(empty($t['enabled'])?'off':'').'">';
-            echo '<td><input type="checkbox" name="tool_ids[]" value="'.$id.'" class="tool-cb" onchange="upd()"></td>';
-            echo '<td><input type="number" value="'.esc_attr($t['priority']??0).'" class="nf-in" style="width:50px;padding:3px;text-align:center" min="0" max="1000" onchange="document.getElementById(\'qe-'.$id.'\').classList.add(\'show\');document.querySelector(\'#qe-'.$id.' input[name=priority]\').value=this.value"></td>';
-            echo '<td><div class="nf-nm"><div class="nf-logo">'; if(!empty($t['logo'])) echo '<img src="'.esc_url($t['logo']).'" alt="">'; else echo '🔧'; echo '</div><div><span class="nf-name">'.esc_html($t['name']??'').'</span></div></div></td>';
-            echo '<td><span class="nf-bdg nf-bdg-info">'.esc_html($t['category']??'').'</span></td>';
-            echo '<td><a href="'.esc_url($t['url']??'#').'" target="_blank" class="nf-url">'.esc_html($t['url']??'').'</a></td>';
-            echo '<td class="nf-desc">'.esc_html($t['description']??'').'</td>';
-            echo '<td><span class="nf-bdg '.(!empty($t['enabled'])?'nf-bdg-on':'nf-bdg-off').'">'.(!empty($t['enabled'])?'启用':'禁用').'</span></td>';
-            echo '<td><div class="nf-acts">';
-            echo '<a href="javascript:void(0)" class="nf-act" onclick="document.getElementById(\'qe-'.$id.'\').classList.toggle(\'show\')">编辑</a>';
-            echo '<form method="post" style="display:inline">'.wp_nonce_field('nr','nr',true,false).'<input type="hidden" name="id" value="'.$id.'"><button type="submit" name="tog_t" class="nf-act">'.(!empty($t['enabled'])?'禁':'启').'</button></form>';
-            echo '<form method="post" style="display:inline" onsubmit="return confirm(\'删除?\')">'.wp_nonce_field('nr','nr',true,false).'<input type="hidden" name="id" value="'.$id.'"><button type="submit" name="del_t" class="nf-act danger">删</button></form>';
-            echo '</div>';
-            echo '<div id="qe-'.$id.'" class="nf-qe"><form method="post">'.wp_nonce_field('nr','nr',true,false).'<input type="hidden" name="id" value="'.$id.'"><input type="hidden" name="upd_t" value="1">';
-            echo '<div class="nf-qe-g">';
-            echo '<div class="f"><label>分类</label><select name="category">'; foreach($cats as $c) echo '<option value="'.esc_attr($c).'"'.selected($t['category']??'',$c,false).'>'.esc_html($c).'</option>'; echo '</select></div>';
-            echo '<div class="f"><label>名称</label><input type="text" name="name" value="'.esc_attr($t['name']??'').'" required></div>';
-            echo '<div class="f"><label>链接</label><input type="url" name="url" value="'.esc_attr($t['url']??'').'" required></div>';
-            echo '<div class="f"><label>Logo</label><input type="url" name="logo" value="'.esc_attr($t['logo']??'').'"></div><div class="f"><label>简介</label><input type="text" name="description" value="'.esc_attr($t['description']??'').'"></div>';
-            echo '<div class="f"><label>排序(0-1000)</label><input type="number" name="priority" value="'.esc_attr($t['priority']??0).'" min="0" max="1000" class="nf-in" style="width:100%"></div>';
-            echo '<div style="display:flex;gap:5px"><button type="submit" class="nf-btn nf-btn-p nf-btn-sm">保存</button><button type="button" class="nf-btn nf-btn-s nf-btn-sm" onclick="document.getElementById(\'qe-'.$id.'\').classList.remove(\'show\')">取消</button></div>';
-            echo '</div></form></div></td></tr>';
-        }
-        
-        if(empty($tools)) echo '<tr><td colspan="8" style="text-align:center;color:var(--mut);padding:24px">暂无工具</td></tr>';
-        echo '</tbody></table></form>';
-        
-        echo '<form method="post" class="nf-add">'.wp_nonce_field('nr','nr',true,false);
-        echo '<div class="f"><label>分类</label><select name="tc" required class="nf-in"><option value="">选择</option>'; foreach($cats as $c) echo '<option value="'.esc_attr($c).'">'.esc_html($c).'</option>'; echo '</select></div>';
-        echo '<div class="f"><label>名称</label><input type="text" name="tn" class="nf-in" placeholder="工具名称" required></div>';
-        echo '<div class="f"><label>链接</label><input type="url" name="tu" class="nf-in" placeholder="https://..." required></div>';
-        echo '<div class="f"><label>Logo URL</label><input type="url" name="tl" class="nf-in" placeholder="图标地址"></div>';
-        echo '<div><label>&nbsp;</label><button type="submit" name="add_t" class="nf-btn nf-btn-p" style="width:100%">+ 添加工具</button></div></form></div></div>';
-        
-        echo '<script>function upd(){var c=document.querySelectorAll(".tool-cb:checked").length;document.getElementById("sel-cnt").textContent=c;document.getElementById("bulk-bar").classList.toggle("show",c>0)}</script>';
-    }
-    public function settings_page() {
-        if (isset($_POST['save']) && wp_verify_nonce($_POST['nonce'], 'nf_settings')) {
-            update_option('newsflash_settings', ['article_template'=>sanitize_text_field($_POST['at']??'sina'),'timeline_template'=>sanitize_text_field($_POST['tt']??'sina'),'timeline_position'=>sanitize_text_field($_POST['tp']??'left'),'show_footer'=>!empty($_POST['sf']),'posts_per_page'=>max(1,(int)($_POST['pp']??10)),'custom_css'=>$_POST['css']??'']);
-            echo '<div class="notice notice-success"><p>已保存</p></div>';
-        }
-        if (isset($_POST['reset_key']) && wp_verify_nonce($_POST['nonce'], 'nf_settings')) { update_option('newsflash_api_key', wp_generate_uuid4()); echo '<div class="notice notice-success"><p>API Key已重置</p></div>'; }
-        $s = get_option('newsflash_settings',[]); $api_key = get_option('newsflash_api_key','');
-        $tpls = ['sina'=>'📰新浪财经','default'=>'⚪简约白','dark'=>'⚫暗夜','cyberpunk'=>'🟣赛博朋克','glass'=>'🔵毛玻璃','pro'=>'💼专业商务','tech'=>'🚀科技感','bloomberg'=>'📊Bloomberg','elegant'=>'✨优雅','premium'=>'💎Premium','minimal'=>'⬜极简','editorial'=>'📝编辑风','brutalist'=>'🧱粗野主义','retro'=>'📜复古','neon'=>'🌈霓虹','nature'=>'🌿自然','luxury'=>'👑奢侈品','startup'=>'🚀创业风','govt'=>'🏛️政府','magazine'=>'📰杂志','custom'=>'🎨自定义'];
-        echo '<div class="wrap"><h1>快讯设置 <small style="font-size:11px;color:#666">v'.NEWSFLASH_VERSION.'</small></h1>';
-        echo '<style>.nf-c{background:#fff;border:1px solid #ccd0d4;border-radius:8px;padding:20px;margin-bottom:20px}.nf-c h2{margin:0 0 16px;font-size:14px;border-bottom:1px solid #eee;padding-bottom:10px}.nf-r{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #f0f0f0}.nf-r:last-child{border-bottom:none}.nf-r label{font-weight:500}.nf-r select{padding:6px 10px;border:1px solid #8c8f94;border-radius:4px;min-width:180px}.nf-r input[type=number]{width:70px;padding:6px 8px;border:1px solid #8c8f94;border-radius:4px}.sw{position:relative;width:44px;height:24px}.sw input{opacity:0}.sl{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#ccc;border-radius:24px}.sl:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:#fff;border-radius:50%}input:checked+.sl{background:#2271b1}input:checked+.sl:before{transform:translateX(20px)}</style>';
-        echo '<form method="post">'.wp_nonce_field('nf_settings','nonce',true,false);
-        echo '<div class="nf-c"><h2>📰 模板</h2>';
-        echo '<div class="nf-r"><label>文章模板</label><select name="at">'; foreach($tpls as $key=>$val) echo '<option value="'.$key.'"'.selected($s['article_template']??'sina',$key,false).'>'.$val.'</option>'; echo '</select></div>';
-        echo '<div class="nf-r"><label>时间线模板</label><select name="tt">'; foreach($tpls as $key=>$val) echo '<option value="'.$key.'"'.selected($s['timeline_template']??'sina',$key,false).'>'.$val.'</option>'; echo '</select></div>';
-        echo '<div class="nf-r"><label>每页数量</label><input type="number" name="pp" value="'.esc_attr($s['posts_per_page']??10).'"></div>';
-        echo '<div class="nf-r"><label>时间线位置</label><select name="tp"><option value="left"'.selected($s['timeline_position']??'left','left',false).'>左</option><option value="center"'.selected($s['timeline_position']??'left','center',false).'>中</option><option value="right"'.selected($s['timeline_position']??'left','right',false).'>右</option></select></div>';
-        echo '<div class="nf-r"><label>显示页脚</label><label class="sw"><input type="checkbox" name="sf" value="1"'.checked(!empty($s['show_footer']),true,false).'><span class="sl"></span></label></div></div>';
-        echo '<div class="nf-c"><h2>🔑 API Key</h2><code style="background:#f6f7f7;padding:8px 12px;border-radius:4px">'.esc_html($api_key).'</code> <button type="submit" name="reset_key" class="button" onclick="return confirm(\'确定重置？\')">重置</button></div>';
-        echo '<p style="margin:0"><button type="submit" name="save" class="button button-primary">保存</button></p></form></div>';
-    }
-    public function api_docs_page() { $k=get_option('newsflash_api_key',''); echo '<div class="wrap"><h1>API</h1><p>Key: <code>'.esc_html($k).'</code></p><pre style="background:#f6f7f7;padding:16px;border-radius:8px">curl -X POST '.rest_url('newsflash/v1/posts').' -H "Content-Type: application/json" -H "X-NewsFlash-Key: '.$k.'" -d \'{"title":"标题","content":"内容"}\'</pre></div>'; }
+    public function recommend_page() { wp_safe_redirect(admin_url('admin.php?page=nf_console&tab=recommend'), 301); exit; }
+    public function settings_page() { wp_safe_redirect(admin_url('admin.php?page=nf_console&tab=display'), 301); exit; }
+    public function api_docs_page() { wp_safe_redirect(admin_url('admin.php?page=nf_console&tab=api'), 301); exit; }
     public function preview_page() { echo '<div class="wrap"><h1>预览</h1>'.do_shortcode('[newsflash_timeline count=5]').'</div>'; }
 }
 function newsflash_plugin() { return NewsFlash_Plugin::instance(); }

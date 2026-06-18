@@ -32,7 +32,7 @@ if (empty($date_str)) {
             $post_id = get_the_ID();
             $time = esc_html(get_the_date('Y-m-d H:i'));
             $title = esc_html(get_the_title());
-            $content = wpautop(wp_kses_post(get_post_field('post_content', $post_id)));
+            $content = apply_filters('the_content', get_post_field('post_content', $post_id));
             $category = get_the_terms($post_id, 'newsflash_category');
             $category_html = '';
             if ($category && !is_wp_error($category)) {

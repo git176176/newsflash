@@ -878,3 +878,50 @@ body.nf-position-center .nf-header p { margin: 0; }
 .nf-rec-name:hover {
     color: #6366f1;
 }
+
+/* ============================================================
+   段落间距兜底 —— 对抗主题把 p{margin:0} 吃掉的情况
+   插件每套模板虽各自定义了 .t-xxx .nf-article-content p 的间距，
+   但部分主题用更高优先级 / !important 压制。这里用
+   「body class (nf-single / nf-archive) + 容器 + !important」
+   的高特异性规则夺回控制权，覆盖所有 20 套模板与每日盘点页。
+   ============================================================ */
+.nf-single .nf-article-content p,
+.nf-archive .nf-article-content p {
+    margin: 0 0 1em !important;
+}
+.nf-single .nf-article-content p:last-child,
+.nf-archive .nf-article-content p:last-child {
+    margin-bottom: 0 !important;
+}
+.nf-single .nf-article-content ul,
+.nf-single .nf-article-content ol,
+.nf-archive .nf-article-content ul,
+.nf-archive .nf-article-content ol {
+    margin: 0 0 1em !important;
+    padding-left: 1.6em !important;
+}
+.nf-single .nf-article-content li,
+.nf-archive .nf-article-content li {
+    margin: 0 0 .4em !important;
+}
+.nf-single .nf-article-content h2,
+.nf-single .nf-article-content h3,
+.nf-single .nf-article-content h4,
+.nf-archive .nf-article-content h2,
+.nf-archive .nf-article-content h3,
+.nf-archive .nf-article-content h4 {
+    margin: 1.4em 0 .6em !important;
+    line-height: 1.4;
+}
+.nf-single .nf-article-content,
+.nf-archive .nf-article-content {
+    line-height: 1.8;
+}
+/* 内容里的 <br> 兜底（部分内容用 br 换行而非 p） */
+.nf-single .nf-article-content br,
+.nf-archive .nf-article-content br {
+    display: block;
+    content: "";
+    margin-top: .5em;
+}
